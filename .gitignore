@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Test scratch (fake HOMEs, throwaway projects, escape-suite state)
+tests/.tmp/
+
+# Runtime output if PITHOS_STATE is pointed inside the repo
+*.jsonl
+trusted.json
+
+# Secrets: never commit keys or env files
+.env
+.env.*
+*.pem
+*.key
+id_*
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

@@ -1,0 +1,33 @@
+extends = "opencode"
+
+# For opencode with the claude-agent provider, which runs the Claude Code binary. Kept apart
+# from the opencode profile so sessions using other providers never see the Claude login.
+
+[fs]
+ro = [
+  "~/.local/bin/claude", "~/.local/share/claude",
+  # user-level config the agent must not rewrite (hooks here run outside the sandbox too)
+  "~/.claude/settings.json", "~/.claude/CLAUDE.md", "~/.claude/plugins", "~/.claude/skills",
+  "~/.claude/commands", "~/.claude/agents", "~/.claude/hooks", "~/.claude/keybindings.json",
+]
+# Claude Code refreshes its login token in this file.
+rw = ["~/.claude/.credentials.json"]
+# ~/.claude.json holds every project's settings and MCP servers: discarded private copy.
+copy = ["~/.claude.json"]
+rw_mkdir = ["~/.claude/projects/{project_slug}"]
+
+[net]
+allow = [
+  "api.anthropic.com", "claude.ai", "console.anthropic.com", "platform.claude.com",
+  "statsig.anthropic.com", "mcp-proxy.anthropic.com",
+]
+
+[env]
+# no auto-update (binary dir is read-only) and no telemetry/error-reporting traffic
+set = { DISABLE_AUTOUPDATER = "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1" }
+
+[agent]
+# Connects opencode to claude-agent once per project, so its models and your default work.
+connect_claude_agent = true
+# Adds the sandbox notice (how to report blocked hosts) to a read-only view of this file.
+notice_into = "~/.claude/CLAUDE.md"

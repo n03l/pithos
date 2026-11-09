@@ -1,0 +1,49 @@
+# Shared by every profile. Paths: absolute, "~/..." or "{project}/...".
+# Anything not listed here does not exist inside the sandbox.
+
+[fs]
+ro = [
+  "/usr",
+  "/etc/ssl", "/etc/ca-certificates", "/etc/alternatives", "/etc/ld.so.cache",
+  "/etc/passwd", "/etc/group", "/etc/nsswitch.conf", "/etc/hosts", "/etc/localtime",
+  "/etc/protocols", "/etc/services", "/etc/mime.types", "/etc/gitconfig", "/etc/inputrc",
+  "/etc/bash.bashrc", "/etc/terminfo",
+  "~/.gitconfig",
+  "~/.venv",
+]
+rw = ["{project}"]
+# Hidden even when inside an allowed path (directories become empty, files empty).
+# Plain paths also make the launcher refuse any bind inside them.
+deny = [
+  "~/.ssh", "~/.gnupg", "~/.aws", "~/.config/gcloud", "~/.netrc", "~/.git-credentials",
+  "{project}/.env", "{project}/**/.env.*",
+]
+# Read-only inside the project: things that would run later, outside the sandbox. Entries
+# missing at start-up are moved aside after the session if the sandbox created them.
+ro_in_project = [
+  ".git/hooks", ".git/config", ".git/commondir", ".git/config.worktree",
+  ".claude/settings.json", ".claude/settings.local.json", ".mcp.json", "opencode.json",
+  ".envrc", ".vscode/settings.json", ".vscode/tasks.json", ".vscode/launch.json",
+]
+
+[net]
+# "host[:port]" (port defaults to 443) or "*.domain[:port]" for subdomains only.
+allow = [
+  "github.com", "codeload.github.com", "*.githubusercontent.com",
+  "pypi.org", "files.pythonhosted.org",
+  "registry.npmjs.org",
+]
+
+[limits]
+# Computed at start from this machine: "N%" of RAM (or of `ulimit -u` for processes), an
+# amount ("16G", "4096"), or "none". Never more than the machine has. These are the defaults.
+# The sandbox runs in a systemd scope; without one pithos refuses to start (see --no-limits).
+processes = "15%"   # TasksMax: tasks in the sandbox, threads included (stops fork bombs)
+memory = "50%"      # RLIMIT_DATA, per process
+total = "75%"       # MemoryMax: the whole sandbox, tmpfs included
+tmpfs = "25%"       # each of ~, /tmp, /var/tmp and /dev/shm, which are RAM
+cpu = "100%"        # CPUQuota: percent of one CPU, so all of them by default
+
+[env]
+pass = ["TERM", "COLORTERM", "LANG", "LC_ALL", "TZ"]
+set = { PATH = "~/.local/bin:/usr/local/bin:/usr/bin:/bin" }

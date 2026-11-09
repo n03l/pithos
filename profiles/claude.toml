@@ -1,0 +1,30 @@
+extends = "base"
+
+[fs]
+ro = [
+  "~/.local/bin/claude", "~/.local/share/claude",
+  # user-level config the agent must not rewrite (hooks here run outside the sandbox too)
+  "~/.claude/settings.json", "~/.claude/CLAUDE.md", "~/.claude/plugins", "~/.claude/skills",
+  "~/.claude/commands", "~/.claude/agents", "~/.claude/hooks", "~/.claude/keybindings.json",
+]
+# Only this project's transcripts and memory persist. The rest of ~/.claude (history.jsonl,
+# other projects, file-history, paste-cache, ...) is a fresh tmpfs that vanishes on exit.
+rw = ["~/.claude/.credentials.json"]
+# ~/.claude.json holds every project's settings and MCP servers: the sandbox gets a private
+# copy, and whatever it writes there is discarded on exit.
+copy = ["~/.claude.json"]
+rw_mkdir = ["~/.claude/projects/{project_slug}"]
+
+[net]
+allow = [
+  "api.anthropic.com", "claude.ai", "console.anthropic.com", "platform.claude.com",
+  "statsig.anthropic.com", "mcp-proxy.anthropic.com",
+]
+
+[env]
+# no auto-update (binary dir is read-only) and no telemetry/error-reporting traffic
+set = { DISABLE_AUTOUPDATER = "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1" }
+
+[agent]
+# Adds the sandbox notice (how to report blocked hosts) to a read-only view of this file.
+notice_into = "~/.claude/CLAUDE.md"
