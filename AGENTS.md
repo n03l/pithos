@@ -24,12 +24,15 @@ Flat on purpose: no package directory. Use only the Python standard library (3.1
   plain `http://` forwarding and the JSON-lines log. `LiveAllowlist` adds hosts approved during
   a session by re-reading the state files when they change. `CappedFile` is the append-only,
   capped writer behind all three lists the agent reads.
+- `publish.py`: `--publish`, host side. It parses the value, checks the first request head of
+  each connection, and pairs it with a connection the bridge opens to `publish.sock`
+  (`PublishServer`).
 - `bridge.py`: runs inside the sandbox under `/usr/bin/python3 -I`. It makes the trace start
-  probe (`TRACE_START`), sets the rlimits, relays `127.0.0.1:3128` to the proxy socket, then
-  execs the command. Keep it tiny and stdlib-only.
+  probe (`TRACE_START`), sets the rlimits, relays `127.0.0.1:3128` to the proxy socket, answers
+  `--publish` tokens, then execs the command. Keep it tiny and stdlib-only.
 - `profiles/*.toml`: default profiles (`base`, `claude`, `opencode`, `opencode-claude`).
   `install.sh` copies them to `~/.config/pithos/` and never overwrites the copies there.
-- `tests/`: unit tests (`test_config.py`, `test_proxy.py`), the escape suite
+- `tests/`: unit tests (`test_config.py`, `test_proxy.py`, `test_publish.py`), the escape suite
   (`escape_suite.sh` runs inside the sandbox, `run_escape_suite.sh` drives it from the host) and
   `stress_limits.py`, a bounded end-to-end stress test of the scope limits (fork storm, OOM kill,
   per-process limit, tmpfs, CPU quota, signals, concurrent sessions).
@@ -86,6 +89,20 @@ Any change that touches one of these needs a test, both a hostile case and a nor
   host names and fixed reasons only, is capped, and is appended to in place because the bind
   pins the inode. The agent notice (`agent.notice_into`) is a read-only overlay, and
   `.pithos.toml` may not set it.
+- **Published ports only let browsers in from their own origin.** `--publish` is command line
+  only: no profile key, and `.pithos.toml` can't set it.
+  - The address is one IP literal: no host names, no `0.0.0.0` or `::`, never `PROXY_PORT`.
+    A non-loopback address prints a warning.
+  - The host, never the sandbox, checks each connection's first request head before any byte
+    reaches the sandbox. It requires exactly one `Host` naming loopback or the bound address,
+    an `Origin` (if sent) equal to `http://` + `Host`, and a `Sec-Fetch-Site` (if sent) of
+    `same-origin` or `none`.
+  - Host sockets never enter the sandbox: the host relays bytes to a connection the bridge
+    opens to `publish.sock`, which is bound alone and read-only.
+  - The control channel is a `SEQPACKET` socketpair. The host only sends on it, and the bridge
+    closes it before exec.
+  - Tokens pair connections; they are not secrets, because the agent can take the bridge's fds.
+  - Pending and open connections are capped, and so are the refusals logged.
 - **Approvals only come from outside the sandbox.** `pithos allow` writes
   `sessions/<session>.json` and `allowed.json` in the state dir, and nothing else feeds
   `LiveAllowlist`. Approved hosts pass the same proxy checks as listed ones:

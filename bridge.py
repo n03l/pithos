@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Runs inside the sandbox (stdlib only, started with /usr/bin/python3 -I).
 
-  bridge.py serve SOCK PORT LIMITS CMD...  set the rlimits in LIMITS ("core=0,nproc=N,data=N"),
+  bridge.py serve SOCK PORT LIMITS PUBLISH CMD...
+                                    set the rlimits in LIMITS ("core=0,nproc=N,data=N"),
                                     listen on 127.0.0.1:PORT, relay each connection to the
-                                    proxy UNIX socket SOCK, then exec CMD
+                                    proxy UNIX socket SOCK, then exec CMD. PUBLISH is "-" or
+                                    "PORT:FD": for each token read on the control socket FD,
+                                    connect 127.0.0.1:PORT and publish.sock (see publish.py)
   bridge.py connect HOST PORT       ssh ProxyCommand: CONNECT through 127.0.0.1:3128, pipe stdio
 """
 
@@ -15,6 +18,8 @@ import threading
 
 PROXY_PORT = 3128
 TRACE_START = "/run/pithos/.trace-start"
+PUBLISH_SOCK = "/run/pithos/publish.sock"
+TOKEN_LEN = 16
 RLIMITS = {"core": resource.RLIMIT_CORE, "nproc": resource.RLIMIT_NPROC,
            "data": resource.RLIMIT_DATA}
 
@@ -54,7 +59,51 @@ def _relay(client, sock_path):
         t.join()
 
 
-def serve(sock_path, port, limits, cmd):
+def parse_publish(arg):
+    """None for "-", else (port, control fd)."""
+    if arg == "-":
+        return None
+    port, sep, fd = arg.partition(":")
+    if not (sep and port.isascii() and port.isdigit() and fd.isascii() and fd.isdigit()):
+        sys.exit(f"pithos: bad publish argument {arg!r}")
+    return int(port), int(fd)
+
+
+def _publish_one(token, sock_path, port):
+    try:
+        inside = socket.create_connection(("127.0.0.1", port), timeout=5)
+        inside.settimeout(None)
+    except OSError:
+        inside = None
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as host:
+        try:
+            host.connect(sock_path)
+            host.sendall(token + (b"1" if inside else b"0"))
+        except OSError:
+            if inside:
+                inside.close()
+            return
+        if inside:
+            with inside:
+                t = threading.Thread(target=_pump, args=(inside, host), daemon=True)
+                t.start()
+                _pump(host, inside)
+                t.join()
+
+
+def publish_loop(fd, sock_path, port):
+    """Answer each token from the host with a connection to the server inside."""
+    with socket.socket(fileno=fd) as ctrl:
+        try:
+            while token := ctrl.recv(256):
+                if len(token) == TOKEN_LEN:
+                    threading.Thread(target=_publish_one, args=(token, sock_path, port),
+                                     daemon=True).start()
+        except OSError:
+            pass  # the host closed it: the session is ending
+
+
+def serve(sock_path, port, limits, publish, cmd):
     apply_limits(limits)
     # A lookup that always fails: in the launcher's trace it marks where bwrap's own setup
     # ends and the sandbox begins (pithos.TRACE_START).
@@ -75,11 +124,16 @@ def serve(sock_path, port, limits, cmd):
         devnull = os.open(os.devnull, os.O_RDWR)
         for fd in (0, 1):
             os.dup2(devnull, fd)
+        if publish:
+            threading.Thread(target=publish_loop, args=(publish[1], PUBLISH_SOCK, publish[0]),
+                             daemon=True).start()
         while True:
             client, _ = listener.accept()
             threading.Thread(target=_relay, args=(client, sock_path), daemon=True).start()
     os.waitpid(pid, 0)
     listener.close()
+    if publish:
+        os.close(publish[1])  # only the relay keeps the control channel
     try:
         os.execvp(cmd[0], cmd)
     except OSError as e:
@@ -120,8 +174,8 @@ def connect(host, port):
 
 
 def main(argv):
-    if len(argv) >= 5 and argv[0] == "serve":
-        serve(argv[1], int(argv[2]), argv[3], argv[4:])
+    if len(argv) >= 6 and argv[0] == "serve":
+        serve(argv[1], int(argv[2]), argv[3], parse_publish(argv[4]), argv[5:])
     elif len(argv) == 3 and argv[0] == "connect":
         connect(argv[1], int(argv[2]))
     else:

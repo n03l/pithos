@@ -26,7 +26,8 @@ pithos ─┬─► bwrap ─► bridge.py ─► claude / opencode / anything
 HTTPS is never decrypted. Clients send `CONNECT host:443`, the proxy checks the name, then relays
 the encrypted bytes, so certificates validate normally.
 
-**Contents:** [Install](#install) · [Usage](#usage) · [When a host is blocked](#when-a-host-is-blocked) ·
+**Contents:** [Install](#install) · [Usage](#usage) ·
+[Web UI and servers](#web-ui-and-servers-in-the-sandbox) · [When a host is blocked](#when-a-host-is-blocked) ·
 [When a file is refused](#when-a-file-is-refused) · [Resource limits](#resource-limits) ·
 [Profiles](#profiles) · [SSH](#ssh) · [Security model](#security-model) ·
 [Reviewing a session](#reviewing-a-session) · [Upgrading](#upgrading) · [Tests](#tests)
@@ -73,6 +74,40 @@ home directory or a directory that contains your config.
 
 Inside `tmux`, `pithos` names the window after the agent (e.g. `claude`). That needs the
 `tmux` setting `setw -g allow-rename on`.
+
+## Web UI and servers in the sandbox
+
+The sandbox has its own network, so a server started in it can't be reached from the host.
+`--publish` opens one port on the host and relays it to the same port inside:
+
+```sh
+cd ~/src/myproject
+pithos -p opencode --publish 4096 -- opencode serve --hostname 127.0.0.1 --port 4096
+# open http://localhost:4096 and log in with the "server password" opencode prints
+```
+
+- `--publish PORT` listens on `127.0.0.1:PORT`. `--publish IP:PORT` (or `[IPv6]:PORT`)
+  listens on that address instead, for example your LAN address, and `pithos` warns: anyone who
+  can reach it can use the server, so keep its password on. Host names, `0.0.0.0` and `3128`
+  (the sandbox's proxy port) are refused.
+- The server inside must listen on `127.0.0.1` and on the same port.
+- Run one sandbox per project, each with its own port. Each project then stays in its own
+  sandbox, and the browser keeps them apart because each port is its own origin.
+- Over SSH, forward the port: `ssh -L 4096:localhost:4096 host`. Another local port works too
+  (`-L 8080:localhost:4096`).
+- `--publish` is a command-line option only: neither a profile nor `.pithos.toml` can open a
+  port.
+
+Only requests a browser would send for a page loaded from that port get through. The first request
+on each connection must name this machine in `Host` (`localhost`, `127.0.0.1`, `::1` or the
+address you gave). It must not come from another origin (`Origin`) or another site
+(`Sec-Fetch-Site`). This keeps out DNS rebinding and other web pages that try to drive the agent
+through your browser. Refused requests get `403` and appear in `pithos log`. A program, unlike a
+browser, can send any header: that is what the server's own password is for.
+
+Don't point a sandboxed project at an opencode server running on the host: that server's tools
+run outside the sandbox. Publishing works the other way round, with the server and its tools
+inside.
 
 ## When a host is blocked
 
@@ -312,6 +347,7 @@ on allowlisted hosts.
 | Approving its own hosts | Approvals live in the state dir, which is never mounted. The sandbox can only get a name denied; you decide from outside. Private and loopback IPs can't be approved this way. |
 | DNS rebinding, cloud metadata | A host name that resolves to a private, loopback or link-local address is refused. |
 | Domain fronting | On port 443 the TLS SNI must equal the host in `CONNECT`. |
+| Web pages driving a published server | `--publish` checks `Host`, `Origin` and `Sec-Fetch-Site` on the host, before anything reaches the sandbox. Only the command line can publish a port. |
 | Host sockets (D-Bus, ssh-agent, docker, X11) | `/run`, `/tmp` and `$XDG_RUNTIME_DIR` are fresh in the sandbox. |
 | Fork bombs, runaway memory, filling `/tmp` | The sandbox runs in a systemd scope with `TasksMax`, `MemoryMax` and `CPUQuota`, plus per-process memory and tmpfs limits; see [Resource limits](#resource-limits). |
 | Escaping via namespaces or the terminal | `--disable-userns`, its own PID namespace, `--new-session` unless the kernel already blocks TIOCSTI. |

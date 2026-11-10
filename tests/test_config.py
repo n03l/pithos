@@ -2188,6 +2188,52 @@ class Surface(unittest.TestCase):
         self.assertEqual(bridge.TRACE_START, config.TRACE_START)
         self.assertEqual(bridge.PROXY_PORT, sb.PROXY_PORT)
         self.assertEqual(sb.PROXY_URL, f"http://127.0.0.1:{bridge.PROXY_PORT}")
+        import publish
+        self.assertEqual(bridge.PUBLISH_SOCK, sb.SANDBOX_PUBLISH_SOCK)
+        self.assertEqual(bridge.TOKEN_LEN, publish.TOKEN_LEN)
+
+
+class Publish(Fixture):
+    def bridge_args(self, argv):
+        i = len(argv) - 1 - argv[::-1].index(config.SANDBOX_RUN + "/bridge.py")
+        return argv[i + 1:]
+
+    def test_off_by_default(self):
+        argv = self.argv(self.plan())
+        self.assertNotIn(config.SANDBOX_RUN + "/publish.sock", argv)
+        self.assertEqual(self.bridge_args(argv)[4:], ["-", "claude"])
+
+    def test_socket_is_bound_read_only_and_bridge_gets_port_and_fd(self):
+        plan = self.plan()
+        sb.add_publish(plan, ("127.0.0.1", 4096))
+        argv = sb.bwrap_argv("bwrap", plan, self.project, ["claude"], publish_fd=9)
+        i = argv.index(config.SANDBOX_RUN + "/publish.sock")
+        self.assertEqual(argv[i - 2:i], ["--ro-bind", f"{self.runtime}/publish.sock"])
+        self.assertEqual(self.bridge_args(argv)[4:], ["4096:9", "claude"])
+
+    def test_dry_run_shows_it(self):
+        out, err = FileNotice.dry_run(self, "--publish", "4096")
+        self.assertIn(config.SANDBOX_RUN + "/publish.sock", out)
+        self.assertIn(" '4096:<fd>' true", out)
+        self.assertNotIn("WARNING", err)
+
+    def test_non_loopback_warns(self):
+        _, err = FileNotice.dry_run(self, "--publish", "192.168.1.107:4096")
+        self.assertIn("WARNING", err)
+        self.assertIn("192.168.1.107:4096", err)
+
+    def test_bad_values_stop_before_anything(self):
+        for value in ("3128", "localhost:4096", "0.0.0.0:4096"):
+            with self.subTest(value=value), self.assertRaises(config.ConfigError):
+                FileNotice.dry_run(self, "--publish", value)
+
+    def test_needs_a_value(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            sb.parse_args(["--publish", "--", "true"])
+
+    def test_project_file_cannot_publish(self):
+        with self.assertRaises(config.ConfigError):
+            config.parse_project_file(self.project, b"[agent]\npublish = \"4096\"\n")
 
 
 class EnvPipe(unittest.TestCase):

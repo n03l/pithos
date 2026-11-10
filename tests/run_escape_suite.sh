@@ -29,4 +29,21 @@ grep -q do-not-leak .env || { echo "FAIL: .env changed on host"; status=1; }
 [ ! -e /usr/escape ] || { echo "FAIL: /usr/escape exists"; status=1; }
 [ ! -e "$PITHOS_STATE/allowed.json" ] || { echo "FAIL: sandbox wrote the saved allowlist"; status=1; }
 [ -d "$PITHOS_STATE/logs" ] || { echo "FAIL: no session log on host"; status=1; }
+
+# --publish: a server in the sandbox is reachable from the host, foreign pages are refused, and
+# the agent's command doesn't inherit the control channel.
+port=$(/usr/bin/python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+"$here/../pithos" -p base --no-file-notice --publish "$port" -- bash -c \
+  'ls -l /proc/self/fd/ > fds-inside.txt; exec python3 -m http.server --bind 127.0.0.1 "$1"' \
+  sh "$port" >/dev/null 2>&1 &
+pub=$!
+code() { curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$@" "http://localhost:$port/"; }
+for _ in $(seq 60); do [ "$(code)" = 200 ] && break; sleep 0.25; done
+[ "$(code)" = 200 ] || { echo "FAIL: published server not reachable"; status=1; }
+[ "$(code -H 'Host: evil.com')" = 403 ] || { echo "FAIL: --publish let a foreign Host in"; status=1; }
+[ "$(code -H 'Origin: http://evil.com')" = 403 ] || { echo "FAIL: --publish let a cross-origin request in"; status=1; }
+grep -q socket fds-inside.txt && { echo "FAIL: the command inherited a socket"; status=1; }
+kill -TERM "$pub"; wait "$pub" 2>/dev/null || true
+"$here/../pithos" --publish 3128 -- true 2>/dev/null && { echo "FAIL: --publish 3128 accepted"; status=1; }
+[ $status = 0 ] && echo "ok   --publish"
 exit $status

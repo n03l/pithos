@@ -53,6 +53,7 @@ deny "edit the limit list"             'echo fake >> "$PITHOS_LIMIT_EVENTS"'
 deny "replace the limit list"          'mv "$PITHOS_LIMIT_EVENTS" /run/pithos/z'
 deny "replace the blocked-files list"  'mv "$PITHOS_BLOCKED_FILES" /run/pithos/y'
 deny "see the trace FIFO's fd"        'ls -l /proc/*/fd 2>/dev/null | grep -q "trace.fifo"'
+deny "publish socket without --publish" 'test -e /run/pithos/publish.sock'
 cat "$(printf '/opt/pithos-a\n/opt/forged\tnot mounted')" 2>/dev/null
 cat /opt/pithos-probe 2>/dev/null
 sleep 1  # the launcher reads strace's output asynchronously

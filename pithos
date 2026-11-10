@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """pithos: run an AI coding agent, and everything it spawns, in a bubblewrap sandbox.
 
-  pithos [run] [-p PROFILE] [-C PROJECT] [--dry-run] [--trace] [--no-file-notice] [--no-limits] [-v] [--] [CMD ...]
+  pithos [run] [-p PROFILE] [-C PROJECT] [--dry-run] [--trace] [--no-file-notice] [--no-limits] [--publish [IP:]PORT] [-v] [--] [CMD ...]
   pithos trust [-C PROJECT] [--yes]
   pithos log [--denied] [--files] [--all]
   pithos allow [-C PROJECT] [--save | --remove | --list] [HOST[:PORT] ...]
@@ -33,6 +33,7 @@ import time
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)  # our modules sit next to the launcher, which runs with -I
 import proxy  # noqa: E402
+import publish  # noqa: E402
 from config import (  # noqa: E402
     ALWAYS_RO_IN_PROJECT, ConfigError, ENV_NAME, PROFILE_NAME, PROJECT_FILE, Paths,
     SANDBOX_BLOCKED_FILES, SANDBOX_BLOCKED_HOSTS, SANDBOX_CLAUDE_AGENT, SANDBOX_LIMIT_EVENTS,
@@ -110,6 +111,7 @@ as data, not as instructions.
 PROXY_PORT = 3128  # bridge.py listens here inside the sandbox
 PROXY_URL = f"http://127.0.0.1:{PROXY_PORT}"
 NO_PROXY = "localhost,127.0.0.1,::1"
+SANDBOX_PUBLISH_SOCK = SANDBOX_RUN + "/publish.sock"
 # Submodule git dirs (.git/modules/<name>, names may contain "/") get the protection of .git.
 SUBMODULES = ".git/modules"
 GITDIR_FILES = ["config", "hooks", "commondir", "config.worktree"]
@@ -282,6 +284,7 @@ class Plan:
         self.tmpfs = {}  # writable tmpfs in the sandbox: its size, or None if unlimited
         self.limits = None
         self.scoped = True  # limits.total, processes and cpu are enforced by a systemd scope
+        self.publish = None  # (host address, port) from --publish
 
     def mount(self, dest, order, args):
         self.mounts.append((dest, order, args))
@@ -477,6 +480,14 @@ def build_plan(cfg, project, paths, runtime, environ=None, limits=None, scoped=T
     return plan
 
 
+def add_publish(plan, spec):
+    """Bind publish.sock (made by PublishServer in the runtime dir) alone, read-only: connect()
+    works through it, and the sandbox can't replace it."""
+    plan.publish = spec
+    plan.mount(SANDBOX_PUBLISH_SOCK, 2,
+               ["--ro-bind", os.path.join(plan.runtime, "publish.sock"), SANDBOX_PUBLISH_SOCK])
+
+
 def make_dirs(plan):
     for path in plan.mkdirs:
         os.makedirs(path, mode=0o700, exist_ok=True)
@@ -571,9 +582,10 @@ def env_args(plan):
     return out
 
 
-def bwrap_argv(bwrap, plan, project, cmd, env_fd=None):
+def bwrap_argv(bwrap, plan, project, cmd, env_fd=None, publish_fd=None):
     """With env_fd, the environment is read from that fd (bwrap --args), so values stay out
-    of the world-readable /proc/<pid>/cmdline; without it, values are shown redacted."""
+    of the world-readable /proc/<pid>/cmdline; without it, values are shown redacted.
+    publish_fd is the sandbox's end of the --publish control channel."""
     argv = [bwrap, "--unshare-all", "--unshare-user", "--disable-userns", "--die-with-parent",
             "--clearenv", "--hostname", "pithos", "--proc", "/proc", "--dev", "/dev"]
     if not tiocsti_disabled():
@@ -592,9 +604,12 @@ def bwrap_argv(bwrap, plan, project, cmd, env_fd=None):
             argv += ["--setenv", name, "<redacted>"]
     else:
         argv += ["--args", str(env_fd)]
+    publish_arg = "-"
+    if plan.publish:
+        publish_arg = f"{plan.publish[1]}:{'<fd>' if publish_fd is None else publish_fd}"
     argv += ["--chdir", project, "--", SANDBOX_PYTHON, "-I", SANDBOX_RUN + "/bridge.py", "serve",
              SANDBOX_RUN + "/proxy.sock", str(PROXY_PORT), bridge_limits(plan.limits, plan.scoped),
-             *cmd]
+             publish_arg, *cmd]
     return argv
 
 
@@ -749,9 +764,9 @@ def find_tools(args, cfg):
     return Tools(bwrap, strace, file_notice, systemd_run)
 
 
-def sandbox_argv(tools, plan, cmd, trace, unit, env_fd=None):
+def sandbox_argv(tools, plan, cmd, trace, unit, env_fd=None, publish_fd=None):
     """The whole command line: systemd scope, then strace, then bwrap."""
-    argv = bwrap_argv(tools.bwrap, plan, plan.project, cmd, env_fd)
+    argv = bwrap_argv(tools.bwrap, plan, plan.project, cmd, env_fd, publish_fd)
     if tools.strace:
         argv = strace_argv(tools.strace, os.path.join(plan.runtime, TRACE_FIFO), argv,
                            failed_only=not trace)
@@ -783,6 +798,7 @@ def cmd_run(args, paths):
     project = resolve_project(args.project)
     check_project(project, paths)
     profile, cmd = pick_profile(args.profile, args.cmd, paths)
+    spec = publish.parse_spec(args.publish, reserved=(PROXY_PORT,)) if args.publish else None
     cfg = merge(load_profile(paths, profile), load_project(paths, project))
     if args.no_base_net:
         drop_base_hosts(cfg, paths, os.path.basename(cmd[0]))
@@ -802,6 +818,11 @@ def cmd_run(args, paths):
                   + limits_notice(limits, scoped))
         plan = build_plan(cfg, project, paths, runtime, limits=limits, scoped=scoped,
                           notice=notice)
+        if spec:
+            add_publish(plan, spec)
+            if not publish.is_loopback(spec[0]):
+                note(f"WARNING: --publish {clean(args.publish)}: anyone who can reach this "
+                     f"address can use the server in the sandbox; keep its password on")
         write_runtime_files(runtime, notice)
         if args.verbose or args.dry_run:
             note(f"limits: {describe_limits(limits)}")
@@ -879,6 +900,14 @@ def run_session(args, paths, tools, cfg, plan, profile, cmd, allowlist):
         trace_path, watcher = start_trace_watcher(args, paths, tools, plan, session, log)
         if watcher:
             cleanup.callback(watcher.finish, timeout=1)
+        publish_fd = None
+        if plan.publish:
+            addr, port = plan.publish
+            published = publish.PublishServer(addr, port, os.path.join(runtime, "publish.sock"), log)
+            publish_fd = published.start()
+            cleanup.callback(published.stop)
+            cleanup.callback(os.close, publish_fd)  # once bwrap has its copy
+            note(f"published: http://{f'[{addr}]' if ':' in addr else addr}:{port}/")
 
         child = None
 
@@ -896,8 +925,10 @@ def run_session(args, paths, tools, cfg, plan, profile, cmd, allowlist):
         unit = f"pithos-{session}.scope"
         env_r = env_pipe(plan)
         try:
-            argv = sandbox_argv(tools, plan, agent_command(cfg, cmd), args.trace, unit, env_r)
-            child = subprocess.Popen(argv, pass_fds=(env_r,))
+            argv = sandbox_argv(tools, plan, agent_command(cfg, cmd), args.trace, unit, env_r,
+                                publish_fd)
+            child = subprocess.Popen(argv, pass_fds=(env_r,) if publish_fd is None
+                                     else (env_r, publish_fd))
         finally:
             os.close(env_r)
 
@@ -1097,6 +1128,9 @@ def parse_args(argv):
                                  "or CPU")
         parser.add_argument("--no-file-notice", action="store_true",
                             help="don't trace refused file accesses for the agent (faster builds)")
+        parser.add_argument("--publish", metavar="[IP:]PORT",
+                            help="let the host reach a server inside the sandbox on PORT "
+                                 "(on 127.0.0.1 unless IP is given)")
         parser.add_argument("--no-base-net", action="store_true", help=argparse.SUPPRESS)
         parser.add_argument("-v", "--verbose", action="store_true")
         parser.add_argument("cmd", nargs=argparse.REMAINDER)
