@@ -74,11 +74,18 @@ Any change that touches one of these needs a test, both a hostile case and a nor
 - **`deny` wins.** Plain `deny` paths also refuse any bind inside them. `ro_in_project`
   entries must resolve inside the project, so a symlink to `~/.ssh` is refused. Their parent
   directories (`.git`, `.claude`) are bound onto themselves so they can't be renamed away and
-  recreated. A parent that is a symlink is refused. Entries missing at start-up are moved aside
+  recreated. That pin is writable, so it only happens where the closest profile bind above the
+  entry is writable (`enclosing_mode`): in a read-only or unbound project the entries are
+  skipped. A parent that is a symlink is refused. Entries missing at start-up are moved aside
   after the session if they appeared (`quarantine`). Submodule git dirs under
   `.git/modules` get the same protection as `.git` (`GITDIR_FILES`); new ones are quarantined.
   Deny globs escape `{project}` and `~`, and a denied symlink also hides its target wherever a
   bind shows it.
+- **Binds mount what was checked.** Every profile bind (pins included) is opened by
+  `open_nofollow`, one path part at a time with `O_PATH|O_NOFOLLOW`, just before `bwrap`
+  starts, and passed as `--bind-fd`/`--ro-bind-fd`. Sources are realpaths, so a link means the
+  path changed after `build_plan`: refused. Otherwise another session writing the same project
+  could swap `.git/hooks` for a link to `~/.ssh` between the checks and the mount.
 - **Network fails closed.** The sandbox has its own net namespace with loopback only. The proxy:
   - requires an allowlist match on host and port;
   - rejects names that resolve to non-public addresses (IP literals pass only if listed);
@@ -195,7 +202,10 @@ Any change that touches one of these needs a test, both a hostile case and a nor
   unprivileged cgroup route (creating a cgroup by hand) only works in `tmux` panes and similar.
   That is why `pithos` uses `systemd-run` and refuses without it.
 - `check_bwrap` runs `bwrap --help` and requires `--size`: without it the tmpfs mounts would
-  be unlimited RAM, and the error from `bwrap` would not say why. Tests fake the binary.
+  be unlimited RAM, and the error from `bwrap` would not say why. It also requires
+  `--ro-bind-fd` (older than `--size`). Tests fake the binary.
+- `--dry-run` and the unit tests show binds as paths (`--bind SRC DEST`); only a real run turns
+  them into `--bind-fd N DEST`, since the fds are opened right before `bwrap` starts.
 - Never test the limits with an unbounded fork bomb or allocation: lower the limit in the test
   and spawn or allocate a fixed amount (see the escape suite).
 - When a harness needs a new host, find it with `pithos log --denied` and add the

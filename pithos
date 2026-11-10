@@ -25,6 +25,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -285,6 +286,7 @@ class Plan:
         self.limits = None
         self.scoped = True  # limits.total, processes and cpu are enforced by a systemd scope
         self.publish = None  # (host address, port) from --publish
+        self.bind_sources = []  # host paths of the profile's binds: mounted by fd (open_binds)
 
     def mount(self, dest, order, args):
         self.mounts.append((dest, order, args))
@@ -310,6 +312,14 @@ def submodule_gitdirs(project):
         else:
             todo += [f"{rel}/{name}" for name in sorted(os.listdir(path))]
     return sorted(gitdirs), sorted(links)
+
+
+def enclosing_mode(path, binds):
+    """Mode of the deepest bind showing path in the sandbox ("ro" wins a tie, as in
+    bwrap_argv's order), or None if no bind does."""
+    best = max(((len(dest), mode != "rw", mode) for mode, _, dest in binds
+                if is_within(path, dest)), default=None)
+    return best and best[2]
 
 
 def build_plan(cfg, project, paths, runtime, environ=None, limits=None, scoped=True,
@@ -359,10 +369,13 @@ def build_plan(cfg, project, paths, runtime, environ=None, limits=None, scoped=T
     if links:
         raise ConfigError(f"{clean(project)}/{links[0]} is a link: can't protect submodule hooks")
     submodule_files = [f"{g}/{name}" for g in plan.gitdirs for name in GITDIR_FILES]
+    profile_binds = list(binds)
     for rel in ALWAYS_RO_IN_PROJECT + fs.get("ro_in_project", []) + submodule_files:
         if os.path.isabs(rel) or ".." in rel.split("/"):
             raise ConfigError(f"fs.ro_in_project entries must be relative: {clean(rel)!r}")
         dest = os.path.normpath(os.path.join(project, rel))
+        if enclosing_mode(dest, profile_binds) != "rw":
+            continue  # read-only already, or not in the sandbox: pinning would make it writable
         if not os.path.lexists(dest):
             plan.skipped.append(f"ro_in_project {dest} (missing)")
             plan.watch.append(dest)
@@ -396,6 +409,7 @@ def build_plan(cfg, project, paths, runtime, environ=None, limits=None, scoped=T
         check_bind(mode, src, dest, paths, denied_roots)
         flag = "--bind" if mode == "rw" else "--ro-bind"
         plan.mount(dest, 1 if mode == "rw" else 2, [flag, src, dest])
+        plan.bind_sources.append(src)
 
     # Every writable tmpfs is sized: they are RAM. / and /dev are made read-only at the end of
     # bwrap's argv (bwrap_argv), so these and the binds are the only places to write.
@@ -582,10 +596,52 @@ def env_args(plan):
     return out
 
 
-def bwrap_argv(bwrap, plan, project, cmd, env_fd=None, publish_fd=None):
+def open_nofollow(path):
+    """O_PATH fd for an absolute path, refusing a link in any part of it. Bind sources are
+    realpaths, so a link means the path changed since build_plan: another session can write
+    inside the project and swap .git/hooks for a link to ~/.ssh before bwrap mounts it."""
+    fd = os.open("/", os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in [p for p in path.split("/") if p]:
+            child = os.open(part, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            if stat.S_ISLNK(os.fstat(fd).st_mode):
+                raise ConfigError(f"{clean(path)} changed into a link while pithos was starting")
+    except OSError as e:
+        os.close(fd)
+        raise ConfigError(f"cannot open {clean(path)}: {e.strerror}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def open_binds(plan):
+    """{host path: fd} for the profile's binds, for bwrap_argv. The caller closes the fds."""
+    fds = {}
+    try:
+        for src in dict.fromkeys(plan.bind_sources):
+            fds[src] = open_nofollow(src)
+    except BaseException:
+        close_fds(fds.values())
+        raise
+    return fds
+
+
+def close_fds(fds):
+    for fd in fds:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+def bwrap_argv(bwrap, plan, project, cmd, env_fd=None, publish_fd=None, bind_fds=None):
     """With env_fd, the environment is read from that fd (bwrap --args), so values stay out
     of the world-readable /proc/<pid>/cmdline; without it, values are shown redacted.
-    publish_fd is the sandbox's end of the --publish control channel."""
+    publish_fd is the sandbox's end of the --publish control channel. With bind_fds (from
+    open_binds), the profile's binds use --bind-fd: bwrap mounts what was opened, never a path
+    looked up again."""
+    bind_fds = bind_fds or {}
     argv = [bwrap, "--unshare-all", "--unshare-user", "--disable-userns", "--die-with-parent",
             "--clearenv", "--hostname", "pithos", "--proc", "/proc", "--dev", "/dev"]
     if not tiocsti_disabled():
@@ -593,6 +649,8 @@ def bwrap_argv(bwrap, plan, project, cmd, env_fd=None, publish_fd=None):
         # parent terminal; a new session prevents that (at the cost of job control).
         argv.append("--new-session")
     for _, _, args in sorted(plan.mounts, key=lambda m: (m[0].count("/"), m[1])):
+        if args[0] in ("--bind", "--ro-bind") and args[1] in bind_fds:
+            args = [args[0] + "-fd", str(bind_fds[args[1]]), args[2]]
         argv += args
     for args in plan.overlays:
         argv += args
@@ -614,14 +672,15 @@ def bwrap_argv(bwrap, plan, project, cmd, env_fd=None, publish_fd=None):
 
 
 def check_bwrap(bwrap):
-    """--size sizes the tmpfs mounts; without it they would be unlimited RAM. Older bubblewrap
-    has no --size, and its own error would be cryptic."""
+    """--size sizes the tmpfs mounts; without it they would be unlimited RAM. --ro-bind-fd
+    (older than --size) mounts the profile's binds. Older bubblewrap has neither, and its own
+    error would be cryptic."""
     try:
         done = subprocess.run([bwrap, "--help"], capture_output=True, text=True, errors="replace",
                               timeout=15)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise ConfigError(f"cannot run {clean(bwrap)}: {e}")
-    if done.returncode != 0 or "--size" not in done.stdout:
+    if done.returncode != 0 or not all(opt in done.stdout for opt in ("--size", "--ro-bind-fd")):
         raise ConfigError(f"{clean(bwrap)} is too old: pithos needs bubblewrap 0.6 or newer, "
                           f"for the sized tmpfs mounts")
 
@@ -764,9 +823,9 @@ def find_tools(args, cfg):
     return Tools(bwrap, strace, file_notice, systemd_run)
 
 
-def sandbox_argv(tools, plan, cmd, trace, unit, env_fd=None, publish_fd=None):
+def sandbox_argv(tools, plan, cmd, trace, unit, env_fd=None, publish_fd=None, bind_fds=None):
     """The whole command line: systemd scope, then strace, then bwrap."""
-    argv = bwrap_argv(tools.bwrap, plan, plan.project, cmd, env_fd, publish_fd)
+    argv = bwrap_argv(tools.bwrap, plan, plan.project, cmd, env_fd, publish_fd, bind_fds)
     if tools.strace:
         argv = strace_argv(tools.strace, os.path.join(plan.runtime, TRACE_FIFO), argv,
                            failed_only=not trace)
@@ -904,9 +963,8 @@ def run_session(args, paths, tools, cfg, plan, profile, cmd, allowlist):
         if plan.publish:
             addr, port = plan.publish
             published = publish.PublishServer(addr, port, os.path.join(runtime, "publish.sock"), log)
-            publish_fd = published.start()
+            publish_fd = published.start()  # closed once bwrap has its copy, below
             cleanup.callback(published.stop)
-            cleanup.callback(os.close, publish_fd)  # once bwrap has its copy
             note(f"published: http://{f'[{addr}]' if ':' in addr else addr}:{port}/")
 
         child = None
@@ -923,14 +981,18 @@ def run_session(args, paths, tools, cfg, plan, profile, cmd, allowlist):
             signal.signal(signum, on_signal)
         set_window_title(os.path.basename(cmd[0]))
         unit = f"pithos-{session}.scope"
-        env_r = env_pipe(plan)
+        # Only bwrap keeps these: the launcher holding the publish channel's sandbox end would
+        # hide a dead bridge from PublishServer.
+        passed = [] if publish_fd is None else [publish_fd]
         try:
+            passed.append(env_r := env_pipe(plan))
+            bind_fds = open_binds(plan)  # last: the shorter the wait before bwrap, the better
+            passed += bind_fds.values()
             argv = sandbox_argv(tools, plan, agent_command(cfg, cmd), args.trace, unit, env_r,
-                                publish_fd)
-            child = subprocess.Popen(argv, pass_fds=(env_r,) if publish_fd is None
-                                     else (env_r, publish_fd))
+                                publish_fd, bind_fds)
+            child = subprocess.Popen(argv, pass_fds=passed)
         finally:
-            os.close(env_r)
+            close_fds(passed)
 
         events = LimitEvents(os.path.join(runtime, "limit-events"), limits, log)
         monitor = start_scope_monitor(child.pid, unit, events) if tools.systemd_run else None

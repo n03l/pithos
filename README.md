@@ -264,7 +264,7 @@ rw   = ["~/.cache/mytool"]             # writable
 rw_mkdir = ["~/.claude/projects/{project_slug}"]  # writable, created if missing
 copy = ["~/.claude.json"]              # writable private copy, discarded on exit
 deny = ["~/.aws", "{project}/**/*.pem"]  # hidden even inside allowed paths (globs ok)
-ro_in_project = [".git/hooks"]         # read-only inside the writable project
+ro_in_project = [".git/hooks"]         # read-only inside the writable project (skipped if it isn't writable)
 
 [net]
 allow = ["api.example.com", "*.example.org", "github.com:22"]   # port defaults to 443

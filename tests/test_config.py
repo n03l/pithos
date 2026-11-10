@@ -180,6 +180,21 @@ class Binds(Fixture):
         self.assertNotIn(f"--bind {self.project}/a/b/c ", joined)
         self.assertIn(f"--ro-bind {self.project}/{config.PROJECT_FILE} ", joined)
 
+    def test_ro_in_project_never_makes_a_read_only_project_writable(self):
+        open(os.path.join(self.project, ".git", "config"), "w").close()
+        git = os.path.join(self.project, ".git")
+        protect = 'ro_in_project = [".git/hooks", ".git/config", ".git/commondir"]'  # last: missing
+        for name, binds in (("read-only", 'ro = ["/usr", "{project}"]'), ("unbound", 'ro = ["/usr"]'),
+                            ("read-only .git", 'rw = ["{project}"]\nro = ["{project}/.git"]')):
+            with self.subTest(name):
+                self.write_profile("p", f"[fs]\n{binds}\n{protect}")
+                plan = sb.build_plan(config.load_profile(self.paths, "p"), self.project,
+                                     self.paths, self.runtime, {})
+                joined = " ".join(self.argv(plan))
+                self.assertNotIn(f"--bind {git}", joined)
+                self.assertNotIn(f"{git}/", joined)
+                self.assertEqual([p for p in plan.watch if p.startswith(git)], [])  # can't be created
+
     def test_ro_in_project_symlinked_ancestor_refused(self):
         # The agent could re-point the link, so the entry inside it can't be protected.
         git = os.path.join(self.project, ".git")
@@ -229,6 +244,41 @@ class Binds(Fixture):
         self.assertIn("--args 7", " ".join(argv))
         args = sb.env_args(plan)
         self.assertEqual(args[args.index("TERM") + 1], "secret-term-value")
+
+    def test_binds_are_mounted_by_fd(self):
+        plan = self.plan()
+        fds = sb.open_binds(plan)
+        self.addCleanup(sb.close_fds, fds.values())
+        hooks = os.path.join(self.project, ".git", "hooks")
+        self.assertEqual(set(fds), {"/usr", self.project, os.path.join(self.project, ".git"), hooks})
+        for src, fd in fds.items():
+            st, host = os.fstat(fd), os.stat(src)
+            self.assertEqual((st.st_dev, st.st_ino), (host.st_dev, host.st_ino), src)
+        joined = " ".join(sb.bwrap_argv("bwrap", plan, self.project, ["x"], bind_fds=fds))
+        self.assertIn(f"--bind-fd {fds[self.project]} {self.project} ", joined)
+        self.assertIn(f"--ro-bind-fd {fds[hooks]} {hooks} ", joined)
+        self.assertIn(f"--ro-bind-fd {fds['/usr']} /usr ", joined)
+        self.assertNotIn(f"--bind {self.project} ", joined)
+        self.assertIn(f"--ro-bind {self.runtime}/notice.md ", joined)  # pithos's own files: paths
+        self.assertIn(f"--bind {self.project} ", " ".join(self.argv(plan)))  # --dry-run: paths
+
+    def test_bind_swapped_for_a_link_after_planning_is_refused(self):
+        # Another session writes the same project: it can swap .git/hooks for a link to ~/.ssh
+        # between build_plan and bwrap. The link must not be followed.
+        plan = self.plan()
+        hooks = os.path.join(self.project, ".git", "hooks")
+        os.rename(hooks, hooks + ".old")
+        os.symlink(os.path.join(self.home, ".ssh"), hooks)
+        with self.assertRaisesRegex(config.ConfigError, "changed into a link"):
+            sb.open_binds(plan)
+        os.unlink(hooks)
+        git = os.path.join(self.project, ".git")
+        os.rename(git, git + ".old")  # a link higher up is refused too
+        os.symlink(self.home, git)
+        with self.assertRaisesRegex(config.ConfigError, "link"):
+            sb.open_nofollow(os.path.join(git, ".ssh"))
+        with self.assertRaisesRegex(config.ConfigError, "cannot open"):
+            sb.open_nofollow(os.path.join(self.project, "missing"))
 
     def test_deny_glob_escapes_project_path(self):
         for name in ("p[1]", "b[x-z]c", "plain"):
@@ -1849,7 +1899,8 @@ class Limits(Fixture):
 
     def test_old_bubblewrap_is_refused_clearly(self):
         fake = os.path.join(self.root, "bwrap")
-        for text, ok in (("    --size BYTES  Set size\n", True), ("    --tmpfs DIR\n", False)):
+        for text, ok in (("    --size BYTES  Set size\n    --ro-bind-fd FD DEST\n", True),
+                         ("    --size BYTES  Set size\n", False), ("    --tmpfs DIR\n", False)):
             with open(fake, "w") as f:
                 f.write(f"#!/bin/sh\ncat <<'EOF'\n{text}EOF\n")
             os.chmod(fake, 0o700)
