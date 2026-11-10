@@ -8,11 +8,22 @@ that allowlists host names. User-facing docs are in `README.md`.
 
 Flat on purpose: no package directory. Use only the Python standard library (3.11+ for `tomllib`).
 
-- `pithos`: the single entry point (subcommands `run`, `trust`, `log`, `allow`, `report`). It loads
-  and validates profiles, builds the `bwrap` command line, starts the proxy and runs the sandbox.
+- `pithos`: the single entry point (subcommands `run`, `trust`, `log`, `allow`, `report`). It
+  builds the sandbox plan and the `bwrap` command line, starts the proxy and runs the session
+  (`run_session`), and handles `allow`. It imports the modules below from its own directory
+  (it runs with `-I`); none of them imports `pithos`.
+- `config.py`: what the other modules share (`ConfigError`, `clean()`, `note()`, where things
+  are inside the sandbox), the profile schema, loading profiles and `.pithos.toml`, the trust
+  store, and the checks on every path a profile names.
+- `resources.py`: `[limits]`, the systemd scope that enforces them, and the limit list for the
+  agent (`LimitEvents`, `ScopeMonitor`).
+- `filetrace.py`: `strace` and its output, and the file notice for the agent (`SandboxView`,
+  `BlockedFiles`, `TraceWatcher`).
+- `report.py`: `pithos report` and `--explain`, and the log parsing `allow` shares.
 - `proxy.py`: host-side allowlisting proxy. It handles `CONNECT` tunnels with a TLS SNI check,
   plain `http://` forwarding and the JSON-lines log. `LiveAllowlist` adds hosts approved during
-  a session by re-reading the state files when they change.
+  a session by re-reading the state files when they change. `CappedFile` is the append-only,
+  capped writer behind all three lists the agent reads.
 - `bridge.py`: runs inside the sandbox under `/usr/bin/python3 -I`. It makes the trace start
   probe (`TRACE_START`), sets the rlimits, relays `127.0.0.1:3128` to the proxy socket, then
   execs the command. Keep it tiny and stdlib-only.
@@ -93,11 +104,12 @@ Any change that touches one of these needs a test, both a hostile case and a nor
   writes to a FIFO in the runtime dir, which is never mounted; `TraceWatcher` reads it. The list
   works like the blocked-hosts list: only `BlockedFiles` writes it, it is a single file bound
   read-only at `/run/pithos/blocked-files`, appended in place, capped, with fixed reasons and
-  paths made one line of printable text by `notice_text`. `SandboxView` classifies from the plan
-  only: never `stat` a path the sandbox named on the host, which would tell it which host paths
-  exist (and can hang on FUSE or autofs). Denied and sensitive paths are always reported as
-  `hidden on purpose`, never as `not mounted`, so the agent isn't led to ask for them. Everything
-  before the start probe from `bridge.py` is setup done by `bwrap` and is ignored.
+  paths made one line of printable text by `clean(path, keep="")`. `SandboxView` classifies from
+  the plan only: never `stat` a path the sandbox named on the host, which would tell it which
+  host paths exist (and can hang on FUSE or autofs). Denied and sensitive paths are always
+  reported as `hidden on purpose`, never as `not mounted`, so the agent isn't led to ask for
+  them. Everything before the start probe from `bridge.py` is setup done by `bwrap` and is
+  ignored.
 - **Resource limits can't be loosened from inside.** Every writable tmpfs is sized, and `/` and
   `/dev` (the unsized tmpfs that `bwrap` mounts) are remounted read-only after every mount.
   `bridge.py` sets soft and hard rlimits equal (`RLIMIT_CORE` 0, `RLIMIT_DATA`, and
