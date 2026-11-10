@@ -340,6 +340,25 @@ class Binds(Fixture):
         self.assertTrue(os.path.exists(f"{old}/config"))
         self.assertTrue(os.path.isdir(self.home))
 
+    def test_quarantine_goes_on_after_a_failed_move(self):
+        self.write_profile("p", '[fs]\nrw = ["{project}"]\nro_in_project = [".envrc", ".mcp.json"]')
+        plan = sb.build_plan(sb.load_profile(self.paths, "p"), self.project, self.paths,
+                             self.runtime, {})
+        envrc, mcp = (os.path.join(self.project, name) for name in (".envrc", ".mcp.json"))
+        for path in (envrc, mcp):
+            open(path, "w").close()
+        real = os.rename
+
+        def rename(src, dst):
+            if src == envrc:
+                raise PermissionError(13, "Permission denied")
+            real(src, dst)
+        err = io.StringIO()
+        with mock.patch.object(sb.os, "rename", rename), contextlib.redirect_stderr(err):
+            self.assertEqual(sb.quarantine(plan, "s1"), [mcp + ".pithos-quarantine-s1"])
+        self.assertIn(f"created {envrc} and it could not be moved aside", err.getvalue())
+        self.assertFalse(os.path.lexists(mcp))
+
     def test_editor_and_direnv_files_are_protected(self):
         paths = sb.Paths({"HOME": self.home, "PITHOS_CONFIG": os.path.join(ROOT, "profiles")})
         os.makedirs(os.path.join(self.project, ".vscode"))
@@ -351,23 +370,57 @@ class Binds(Fixture):
         for rel in (".envrc", ".vscode/settings.json", ".vscode/launch.json"):
             self.assertIn(os.path.join(self.project, rel), plan.watch)
 
-    def test_ssh_agent_refuses_providers(self):
+    SSH = {"ssh": {"key": "~/.ssh/id_ed25519"}}
+
+    def fake_ssh(self, add_status=0):
+        """subprocess.run for ssh-agent and ssh-add; the agent is a real process to kill."""
+        agent = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(agent.wait)
+        self.addCleanup(agent.kill)
         calls = []
 
-        class Done(Exception):
-            pass
-
-        def fake_run(argv, **_kw):
+        def run(argv, **_kw):
             calls.append(argv)
-            raise Done()
-        real, sb.subprocess.run = sb.subprocess.run, fake_run
-        try:
-            with self.assertRaises(Done):
-                sb.start_ssh_agent({"ssh": {"key": "~/.ssh/id_ed25519"}}, self.project,
-                                   self.paths, self.runtime, sb.Plan())
-        finally:
-            sb.subprocess.run = real
+            if argv[0] == "ssh-agent":
+                return subprocess.CompletedProcess(argv, 0, f"SSH_AGENT_PID={agent.pid}; export\n")
+            return subprocess.CompletedProcess(argv, add_status)
+        return agent, calls, run
+
+    def start_agent(self, run, plan=None):
+        with mock.patch.object(sb.subprocess, "run", run):
+            return sb.start_ssh_agent(self.SSH, self.project, self.paths, self.runtime,
+                                      plan or sb.Plan())
+
+    def write_known_hosts(self):
+        with open(os.path.join(self.home, ".ssh", "known_hosts"), "w") as f:
+            f.write("github.com ssh-ed25519 AAAA\n")
+
+    def test_ssh_agent_refuses_providers(self):
+        self.write_known_hosts()
+        agent, calls, run = self.fake_ssh()
+        plan = sb.Plan()
+        self.assertEqual(self.start_agent(run, plan), agent.pid)
         self.assertEqual(calls[0][:4], ["ssh-agent", "-s", "-P", "none"])
+        self.assertIn("StrictHostKeyChecking=yes", plan.env["GIT_SSH_COMMAND"])
+        self.assertIsNone(agent.poll())  # running: the launcher stops it at the end
+
+    def test_missing_known_hosts_starts_no_agent(self):
+        _, calls, run = self.fake_ssh()
+        with self.assertRaisesRegex(sb.ConfigError, "known_hosts"):
+            self.start_agent(run)
+        self.assertEqual(calls, [])
+
+    def test_ssh_agent_never_outlives_a_failed_start(self):
+        """Once ssh-add ran, the agent holds the key: any failure must stop it."""
+        self.write_known_hosts()
+        for failure in ("ssh-add", "copy"):
+            with self.subTest(failure=failure):
+                agent, _, run = self.fake_ssh(add_status=1 if failure == "ssh-add" else 0)
+                copy = mock.patch.object(sb.shutil, "copyfile", side_effect=OSError(5, "EIO"))
+                with copy if failure == "copy" else contextlib.nullcontext(), \
+                        self.assertRaises(sb.ConfigError):
+                    self.start_agent(run)
+                self.assertEqual(agent.wait(timeout=5), -15)
 
     def test_project_checks(self):
         for bad in [self.home, os.path.dirname(self.home), self.config, "/", "/tmp"]:
@@ -807,6 +860,25 @@ class AllowCommand(Fixture):
             sb.cmd_log(args, self.paths)
         self.assertIn('"[2606:4700:4700::1111]:443"', out.getvalue())
 
+    def run_log(self, *argv, paths=None):
+        _, args = sb.parse_args(["log", *argv])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(sb.cmd_log(args, paths or self.paths), 0)
+        return out.getvalue()
+
+    def test_log_denied_without_denials_says_only_that(self):
+        self.write_log([{"action": "allow", "host": "github.com", "port": 443}])
+        self.assertEqual(self.run_log("--denied"), "nothing denied\n")
+
+    def test_log_works_in_a_state_dir_with_glob_characters(self):
+        state = os.path.join(self.root, "state[1]")
+        paths = sb.Paths({"HOME": self.home, "PITHOS_STATE": state})
+        os.makedirs(paths.logs)
+        with open(os.path.join(paths.logs, "s1.jsonl"), "w") as f:
+            f.write(json.dumps({"action": "start", "profile": "base"}) + "\n")
+        self.assertIn("profile=base", self.run_log(paths=paths))
+
 
 class Report(Fixture):
     SID = "20260101-120000-abc123"
@@ -955,7 +1027,7 @@ class Report(Fixture):
 
     def test_session_id_is_validated(self):
         self.write([self.start()])
-        for bad in ("../x", "20260101-120000-abc12", "x" * 10):
+        for bad in ("../x", "20260101-120000-abc12", "x" * 10, "2026010١-120000-abc123"):
             _, args = sb.parse_args(["report", "--session", bad])
             with self.assertRaises(sb.ConfigError):
                 sb.cmd_report(args, self.paths)
@@ -1622,6 +1694,10 @@ class FileNotice(Fixture):
         self.write_profile("base", "[agent]\nfile_notice = false\n[fs]\nrw = [\"{project}\"]\n")
         self.assertTrue(self.dry_run()[0].startswith("/b/bwrap "))
 
+    def test_dry_run_changes_nothing_on_the_host(self):
+        self.dry_run()
+        self.assertFalse(os.path.exists(self.paths.state))
+
     def test_missing_strace_only_warns(self):
         out, err = self.dry_run(strace=False)
         self.assertTrue(out.startswith("/b/bwrap "))
@@ -1690,7 +1766,7 @@ class Limits(Fixture):
                            ("memory", "150%"), ("memory", "1.5G"), ("memory", "1e9"),
                            ("memory", ""), ("memory", "50 %"), ("memory", 0), ("memory", -5),
                            ("processes", "4096K"), ("processes", "1G"), ("tmpfs", "9" * 40),
-                           ("total", "None")):
+                           ("total", "None"), ("memory", "١G"), ("memory", "٥٠%")):
             with self.subTest(key=key, value=value), self.assertRaisesRegex(sb.ConfigError, key):
                 self.resolve(**{key: value})
 
@@ -1887,6 +1963,14 @@ class LimitEventsTest(Fixture):
                                   {"action": "limit", "limit": "processes", "count": 3}])
         self.assertEqual(events.totals, {"memory": 1, "processes": 3})
 
+    def test_without_a_total_limit_no_limit_is_claimed(self):
+        path, events, _ = self.events()
+        events.limits = {**self.LIMITS, "total": None}
+        events.add("memory", 2)
+        with open(path) as f:
+            self.assertEqual(f.read(), "12:00:00\tmemory\tthe kernel killed 2 processes: the "
+                                       "machine ran out of memory\n")
+
     def test_capped_but_still_counted(self):
         path, events, logged = self.events()
         for _ in range(sb.LIMIT_EVENTS_LIMIT + 50):
@@ -1973,7 +2057,7 @@ class Bridge(unittest.TestCase):
 
     def test_refuses_bad_specs(self):
         for spec in ("nproc=-1", "evil=1", "nproc=1;x", "nproc", "", "core=0,,data=1",
-                     "nproc=0x10"):
+                     "nproc=0x10", "nproc=١٠"):
             with self.subTest(spec=spec):
                 self.assertNotEqual(self.apply(spec).returncode, 0)
 
@@ -2088,6 +2172,37 @@ class Surface(unittest.TestCase):
 
     def test_clean_strips_escapes(self):
         self.assertNotIn("\x1b", sb.clean("\x1b]52;c;evil\x07host"))
+        self.assertEqual(sb.clean("a\tb\nc"), "a\tb\nc")
+        self.assertEqual(sb.clean("a\tb\nc", keep=""), "a\\x09b\\x0ac")
+
+    def test_bridge_agrees_with_the_launcher(self):
+        """bridge.py runs alone in the sandbox, so it repeats these: they must not drift."""
+        sys.path.insert(0, ROOT)
+        import bridge
+        self.assertEqual(bridge.TRACE_START, sb.TRACE_START)
+        self.assertEqual(bridge.PROXY_PORT, sb.PROXY_PORT)
+        self.assertEqual(sb.PROXY_URL, f"http://127.0.0.1:{bridge.PROXY_PORT}")
+
+
+class EnvPipe(unittest.TestCase):
+    def plan(self, value):
+        plan = sb.Plan()
+        plan.env = {"A": value}
+        return plan
+
+    def open_fds(self):
+        return len(os.listdir("/proc/self/fd"))
+
+    def test_holds_the_environment(self):
+        fd = sb.env_pipe(self.plan("x y"))
+        with os.fdopen(fd, "rb") as f:
+            self.assertEqual(f.read(), b"--setenv\0A\0x y\0")
+
+    def test_too_large_is_refused_without_leaking(self):
+        before = self.open_fds()
+        with self.assertRaisesRegex(sb.ConfigError, "too large"):
+            sb.env_pipe(self.plan("x" * sb.ENV_PIPE_MAX))
+        self.assertEqual(self.open_fds(), before)
 
 
 if __name__ == "__main__":

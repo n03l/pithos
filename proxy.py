@@ -82,7 +82,7 @@ def split_host_port(target, default_port=None):
         if default_port is None:
             raise ValueError("missing port")
         return host, default_port
-    if not port.isdigit() or not 0 < int(port) < 65536:
+    if not (port.isascii() and port.isdigit()) or not 0 < int(port) < 65536:
         raise ValueError("invalid port")
     return host, int(port)
 
@@ -258,35 +258,57 @@ class Logger:
             f.write(line)
 
 
+def append_line(path, line):
+    """Append to a file bound into the sandbox. It is appended to in place, never replaced: the
+    bind pins the inode. A failed write loses only the notice, never what it reports on."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+class CappedFile:
+    """A notice file for the agent: at most `limit` lines, then `closing` once. A path of None
+    writes nothing."""
+
+    def __init__(self, path, limit, closing):
+        self.path, self.limit, self.closing = path, limit, closing
+        self.lines = 0
+        self.closed = path is None
+
+    def write(self, line):
+        """Append line; False if it was not written because the file is full."""
+        if self.closed:
+            return False
+        if self.lines >= self.limit:
+            self.closed = True
+            append_line(self.path, self.closing)
+            return False
+        self.lines += 1
+        append_line(self.path, line)
+        return True
+
+
 class BlockedList:
     """The hosts refused this session, one "host:port<TAB>reason" line each, for the agent.
 
     The sandbox picks these names and an agent reads them: callers pass only normalized hosts
-    and fixed reasons. The file is bind-mounted, so it is appended to and never replaced.
+    and fixed reasons.
     """
 
     def __init__(self, path):
-        self.path = path
+        self.file = CappedFile(path, BLOCKED_LIMIT, "list truncated, the user can see the rest "
+                                                    "with: pithos log --denied\n")
         self.seen = set()
-        self.truncated = False
 
     def add(self, host, port, reason):
-        if self.path is None or (host, port) in self.seen or self.truncated:
-            return
-        if len(self.seen) >= BLOCKED_LIMIT:
-            self.truncated = True
-            line = "list truncated, the user can see the rest with: pithos log --denied\n"
-        else:
+        if (host, port) not in self.seen and \
+                self.file.write(f"{live_entry(host, port)}\t{reason}\n"):
             self.seen.add((host, port))
-            line = f"{live_entry(host, port)}\t{reason}\n"
-        try:
-            fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-            try:
-                os.write(fd, line.encode("ascii"))
-            finally:
-                os.close(fd)
-        except OSError:
-            pass  # only the report is lost: the connection is refused either way
 
 
 class ProxyServer:

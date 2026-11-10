@@ -24,7 +24,7 @@ def apply_limits(spec):
     inside the sandbox's user namespace, so RLIMIT_NPROC counts only the sandbox's tasks."""
     for item in spec.split(","):
         name, _, value = item.partition("=")
-        if name not in RLIMITS or not value.isdigit():
+        if name not in RLIMITS or not (value.isascii() and value.isdigit()):
             sys.exit(f"pithos: bad limit {item!r}")
         limit = int(value)
         hard = resource.getrlimit(RLIMITS[name])[1]

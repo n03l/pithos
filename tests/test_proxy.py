@@ -68,7 +68,8 @@ class AllowlistTest(unittest.TestCase):
         self.assertFalse(self.check("10.1.2.3", 443))
 
     def test_bad_entries(self):
-        for bad in ["*.1.2.3.4", "github.com:0", "github.com:99999", "a b", 42, "*"]:
+        for bad in ["*.1.2.3.4", "github.com:0", "github.com:99999", "a b", 42, "*",
+                    "github.com:٤٤٣", "github.com:²", "github.com:+443"]:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 proxy.Allowlist([bad])
 
@@ -170,6 +171,26 @@ class BlockedListTest(unittest.TestCase):
         proxy.BlockedList(path).add("2001:db8::1", 443, proxy.NOT_LISTED)
         with open(path) as f:
             self.assertTrue(f.read().startswith("[2001:db8::1]:443\t"))
+
+
+class CappedFileTest(unittest.TestCase):
+    def test_capped_then_closed(self):
+        path = os.path.join(scratch_dir(self), "list")
+        capped = proxy.CappedFile(path, 2, "full\n")
+        self.assertEqual([capped.write(f"{n}\n") for n in range(4)], [True, True, False, False])
+        with open(path) as f:
+            self.assertEqual(f.read(), "0\n1\nfull\n")
+
+    def test_no_path_writes_nothing(self):
+        self.assertFalse(proxy.CappedFile(None, 2, "full\n").write("x\n"))
+
+    def test_never_follows_a_link(self):
+        root = scratch_dir(self)
+        target, link = os.path.join(root, "target"), os.path.join(root, "list")
+        open(target, "w").close()
+        os.symlink(target, link)
+        proxy.CappedFile(link, 2, "full\n").write("x\n")
+        self.assertEqual(os.path.getsize(target), 0)
 
 
 class SniParser(unittest.TestCase):
