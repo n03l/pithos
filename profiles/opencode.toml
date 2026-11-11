@@ -1,7 +1,7 @@
 extends = "base"
 
 [fs]
-ro = ["~/.opencode", "~/.config/opencode",]
+ro = ["~/.opencode", "~/.config/opencode", "~/.cache/ms-playwright"]
 # opencode's own data, state and cache dirs are shared by every project and hold binaries it
 # runs, so each project gets its own (see XDG_* below) instead.
 rw_mkdir = ["~/.local/share/pithos-opencode/{project_slug}"]
@@ -17,4 +17,4 @@ allow = [
 [env]
 # opencode reads the Gemini key from any of the first three
 pass = ["GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "TINYFISH_API_KEY"]
-set = { PATH = "~/.opencode/bin:~/.local/bin:/usr/local/bin:/usr/bin:/bin", OPENCODE_DISABLE_AUTOUPDATE = "1", OPENCODE_CONFIG = "/run/pithos/opencode.json", XDG_DATA_HOME = "~/.local/share/pithos-opencode/{project_slug}/data", XDG_STATE_HOME = "~/.local/share/pithos-opencode/{project_slug}/state", XDG_CACHE_HOME = "~/.local/share/pithos-opencode/{project_slug}/cache", npm_config_cache = "~/.local/share/pithos-opencode/{project_slug}/npm" }
+set = { PATH = "~/.opencode/bin:~/.local/bin:/usr/local/bin:/usr/bin:/bin", OPENCODE_DISABLE_AUTOUPDATE = "1", OPENCODE_CONFIG = "/run/pithos/opencode.json", XDG_DATA_HOME = "~/.local/share/pithos-opencode/{project_slug}/data", XDG_STATE_HOME = "~/.local/share/pithos-opencode/{project_slug}/state", XDG_CACHE_HOME = "~/.local/share/pithos-opencode/{project_slug}/cache", npm_config_cache = "~/.local/share/pithos-opencode/{project_slug}/npm", PLAYWRIGHT_MCP_SANDBOX = "false", PLAYWRIGHT_BROWSERS_PATH = "~/.cache/ms-playwright" }

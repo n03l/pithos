@@ -7,7 +7,7 @@ ro = [
   "/etc/ssl", "/etc/ca-certificates", "/etc/alternatives", "/etc/ld.so.cache",
   "/etc/passwd", "/etc/group", "/etc/nsswitch.conf", "/etc/hosts", "/etc/localtime",
   "/etc/protocols", "/etc/services", "/etc/mime.types", "/etc/gitconfig", "/etc/inputrc",
-  "/etc/bash.bashrc", "/etc/terminfo",
+  "/etc/bash.bashrc", "/etc/terminfo", "/etc/chromium.d",
   "~/.gitconfig",
   "~/.venv",
 ]
