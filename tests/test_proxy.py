@@ -382,6 +382,36 @@ class ProxyEndToEnd(unittest.TestCase):
         self.assertNotIn("Proxy-Authorization", sent)
         self.assertIn("Connection: close", sent)
 
+    def test_plain_http_host_comes_from_the_url(self):
+        self.upstream.reply = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        self.start([f"echo.test:{self.upstream.port}"])
+        req = (f"GET http://echo.test:{self.upstream.port}/ HTTP/1.1\r\nHost: evil.example\r\n"
+               "HOST : evil.example\r\nAccept: */*\r\n\r\n").encode()
+        self.request(req)
+        self.upstream.done.wait(5)
+        sent = self.upstream.received.decode()
+        self.assertNotIn("evil", sent)
+        self.assertIn(f"\r\nHost: echo.test:{self.upstream.port}\r\n", sent)
+        self.assertIn("\r\nAccept: */*\r\n", sent)
+
+    def test_plain_http_refuses_folded_headers(self):
+        self.start([f"echo.test:{self.upstream.port}"])
+        req = (f"GET http://echo.test:{self.upstream.port}/ HTTP/1.1\r\nX-A: 1\r\n"
+               " Host: evil.example\r\n\r\n").encode()
+        head, _ = self.request(req)
+        self.assertIn(b" 400 ", head)
+
+    def test_log_is_capped(self):
+        self.start(["other.test"])
+        self.server.log.limit = 2000
+        for _ in range(30):
+            self.request(self.connect_line("echo.test"))
+        with open(self.log_path) as f:
+            events = [json.loads(line) for line in f]
+        self.assertLessEqual(os.path.getsize(self.log_path), 2000 + 100)  # + the last line
+        self.assertEqual(events[-1]["action"], "log_truncated")
+        self.assertEqual([e["action"] for e in events].count("log_truncated"), 1)
+
     def test_rejects_other_forms(self):
         self.start(["echo.test"])
         for raw in [b"GET https://echo.test/ HTTP/1.1\r\n\r\n", b"GET / HTTP/1.1\r\n\r\n",

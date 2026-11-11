@@ -87,6 +87,8 @@ def collect_logs(files):
                     data["starts"].append(event)
                 elif action == "exit":
                     data["exits"].append(event)
+                elif action == "log_truncated":
+                    bump(data["stats"], "truncated")
                 elif action == "quarantine":
                     bump(data["quarantined"], str(event.get("path")))
                 elif action == "limit" and event.get("limit") in LIMIT_COUNTERS \
@@ -243,6 +245,9 @@ def print_report(paths, files, data, cfg, why, project):
         print(f"process starts refused at the process limit: {data['limits_hit']['processes']}")
     if data["stats"].get("bad"):
         print(f"unreadable log lines: {data['stats']['bad']}")
+    if data["stats"].get("truncated"):
+        print(f"logs truncated at their size limit: {data['stats']['truncated']} "
+              "(later events are missing)")
     if cfg is None:
         print(clean(f"profile checks skipped: {why}"))
     else:

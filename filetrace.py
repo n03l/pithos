@@ -14,7 +14,7 @@ import threading
 
 import proxy
 from config import (
-    SANDBOX_PYTHON, SYSTEM_FORBIDDEN, TRACE_START, clean, is_sensitive, is_within, note,
+    SYSTEM_FORBIDDEN, TRACE_START, clean, is_sensitive, is_within, note,
 )
 
 
@@ -46,7 +46,6 @@ TRACE_ESCAPE = re.compile(r"\\(x[0-9a-fA-F]{2}|[0-7]{1,3}|.)", re.S)
 TRACE_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "v": "\v", "f": "\f", "a": "\a", "b": "\b"}
 TRACE_LINE_MAX = 65536
 TRACE_FIFO = "trace.fifo"  # in the runtime dir: strace writes, TraceWatcher reads
-TRACE_STARTS = (f'execve("{SANDBOX_PYTHON}"',)  # traces from before the start probe
 TRACE_ERROR = re.compile(r"\) += -1 (E[A-Z0-9]+) \([^()]*\)$")
 TRACE_WRITE_FLAGS = re.compile(r"\bO_(?:WRONLY|RDWR|CREAT|TRUNC)\b")
 TRACE_WRITE_CALLS = re.compile(
@@ -119,7 +118,7 @@ def parse_trace_call(text):
 
 def sandbox_calls(lines):
     """trace_calls after the sandbox starts. Bwrap's own setup comes before the bridge's start
-    probe (older traces: the bridge's execve) and is skipped; so is the probe itself."""
+    probe and is skipped; so is the probe itself."""
     started = False
     probe = f'"{TRACE_START}"'
     for text in trace_calls(lines):
@@ -127,8 +126,6 @@ def sandbox_calls(lines):
             started = True
         elif started:
             yield text
-        else:
-            started = text.startswith(TRACE_STARTS)
 
 
 # -- telling the agent about refused file accesses -------------------------------------

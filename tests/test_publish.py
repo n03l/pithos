@@ -189,6 +189,22 @@ class Session(unittest.TestCase):
             self.start(bridge_running=False)
             self.assertTrue(self.request(b"GET / HTTP/1.1\r\n").startswith(b"HTTP/1.1 408 "))
 
+    def test_trickled_head_is_408(self):
+        """One byte at a time, each well within the timeout: the whole head still has one."""
+        with mock.patch.object(publish, "HEAD_TIMEOUT", 0.5):
+            self.start(bridge_running=False)
+            began = time.monotonic()
+            with socket.create_connection(("127.0.0.1", self.port), timeout=5) as c:
+                try:
+                    for byte in b"GET / HTTP/1.1\r\nX: " + b"a" * 100:
+                        c.send(bytes([byte]))
+                        time.sleep(0.1)
+                except OSError:
+                    pass  # closed by the server after its 408
+                out = c.recv(4096)
+            self.assertTrue(out.startswith(b"HTTP/1.1 408 "), out)
+            self.assertLess(time.monotonic() - began, 3)
+
     def test_forged_token_gets_nothing(self):
         inside = InsideServer(self)
         with mock.patch.object(publish, "PAIR_TIMEOUT", 1):

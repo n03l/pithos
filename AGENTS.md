@@ -21,7 +21,8 @@ Flat on purpose: no package directory. Use only the Python standard library (3.1
   `BlockedFiles`, `TraceWatcher`).
 - `report.py`: `pithos report`, and the log parsing `allow` shares.
 - `proxy.py`: host-side allowlisting proxy. It handles `CONNECT` tunnels with a TLS SNI check,
-  plain `http://` forwarding and the JSON-lines log. `LiveAllowlist` adds hosts approved during
+  plain `http://` forwarding (with the `Host` header taken from the checked URL) and the capped
+  JSON-lines log (`LOG_LIMIT`). `LiveAllowlist` adds hosts approved during
   a session by re-reading the state files when they change. `CappedFile` is the append-only,
   capped writer behind all three lists the agent reads.
 - `publish.py`: `--publish`, host side. It parses the value, checks the first request head of

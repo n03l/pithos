@@ -195,19 +195,24 @@ def same_entry(a, b):
 
 
 def update_entries(paths, sessions, project, change, save):
-    """Apply change(list) -> list to each session file and, with save, the project's saved list."""
+    """Apply change(list) -> list to each session file and, with save, the project's saved list.
+    Every file is checked before any is written: a damaged one changes nothing anywhere."""
     with allow_lock(paths):
+        records = {}
         for session in sessions:
             path = paths.session_file(session)
             record = read_json_table(path)
             if record == {}:
                 continue  # the session ended a moment ago
-            allow = entry_list(None if record is None else record.get("allow", []), path)
-            write_private_json(path, {**record, "allow": change(allow)})
+            entry_list(None if record is None else record.get("allow", []), path)
+            records[path] = record
         if save:
             table = read_json_table(paths.allowed)
-            saved = entry_list(None if table is None else table.get(project, []), paths.allowed)
-            kept = change(saved)
+            entry_list(None if table is None else table.get(project, []), paths.allowed)
+        for path, record in records.items():
+            write_private_json(path, {**record, "allow": change(record.get("allow", []))})
+        if save:
+            kept = change(table.get(project, []))
             table = {k: v for k, v in table.items() if k != project}
             write_private_json(paths.allowed, {**table, project: kept} if kept else table)
 
@@ -689,7 +694,7 @@ def stop_process(pid):
         os.kill(pid, signal.SIGTERM)
 
 
-def start_ssh_agent(cfg, project, paths, runtime, plan):
+def start_ssh_agent(cfg, project, paths, plan):
     ssh = cfg.get("ssh", {})
     if "key" not in ssh:
         return None
@@ -698,7 +703,7 @@ def start_ssh_agent(cfg, project, paths, runtime, plan):
     if not os.path.isfile(known):
         raise ConfigError(f"ssh.known_hosts: {clean(known)} is missing: the sandbox's ssh "
                           f"checks host keys against it")
-    sock = os.path.join(runtime, "ssh-agent.sock")
+    sock = os.path.join(plan.runtime, "ssh-agent.sock")
     # -P none: the sandbox may only use this key, never make the agent load PKCS#11/FIDO
     # providers on the host.
     try:
@@ -714,16 +719,23 @@ def start_ssh_agent(cfg, project, paths, runtime, plan):
         if subprocess.run(["ssh-add", key], env={**os.environ, "SSH_AUTH_SOCK": sock}).returncode:
             raise ConfigError(f"ssh-add {key} failed")
         try:
-            shutil.copyfile(known, os.path.join(runtime, "known_hosts"))
+            shutil.copyfile(known, os.path.join(plan.runtime, "known_hosts"))
         except OSError as e:
             raise ConfigError(f"cannot copy {clean(known)}: {e.strerror}")
     except BaseException:
         stop_process(agent_pid)
         raise
+    add_ssh(plan)
+    return agent_pid
+
+
+def add_ssh(plan):
+    """Mounts and environment for the agent socket and known_hosts in the runtime dir."""
+    sock = os.path.join(plan.runtime, "ssh-agent.sock")
     plan.mount(SANDBOX_RUN + "/ssh-agent.sock", 1,
                ["--bind", sock, SANDBOX_RUN + "/ssh-agent.sock"])
-    plan.mount(SANDBOX_RUN + "/known_hosts", 2,
-               ["--ro-bind", os.path.join(runtime, "known_hosts"), SANDBOX_RUN + "/known_hosts"])
+    known = os.path.join(plan.runtime, "known_hosts")
+    plan.mount(SANDBOX_RUN + "/known_hosts", 2, ["--ro-bind", known, SANDBOX_RUN + "/known_hosts"])
     if os.path.exists("/etc/ssh/ssh_config"):
         plan.mount("/etc/ssh/ssh_config", 2,
                    ["--ro-bind", "/etc/ssh/ssh_config", "/etc/ssh/ssh_config"])
@@ -732,7 +744,6 @@ def start_ssh_agent(cfg, project, paths, runtime, plan):
     plan.env["GIT_SSH_COMMAND"] = shlex.join([
         "ssh", "-o", f"ProxyCommand={proxy_cmd}", "-o", "StrictHostKeyChecking=yes",
         "-o", f"UserKnownHostsFile={SANDBOX_RUN}/known_hosts"])
-    return agent_pid
 
 
 # -- commands --------------------------------------------------------------------------
@@ -871,6 +882,8 @@ def cmd_run(args, paths):
             for line in plan.skipped:
                 note(f"skipped {line}")
         if args.dry_run:
+            if "key" in cfg.get("ssh", {}):
+                add_ssh(plan)  # what start_ssh_agent adds, without starting the agent
             argv = sandbox_argv(tools, plan, agent_command(cfg, cmd), "pithos-<session>.scope")
             print(shlex.join(argv))
             return 0
@@ -929,7 +942,7 @@ def run_session(args, paths, tools, cfg, plan, profile, cmd, allowlist):
         server.start(os.path.join(runtime, "proxy.sock"))
         cleanup.callback(server.stop)
 
-        agent_pid = start_ssh_agent(cfg, project, paths, runtime, plan)
+        agent_pid = start_ssh_agent(cfg, project, paths, plan)
         if agent_pid:
             cleanup.callback(stop_process, agent_pid)
         watcher = start_file_notice(paths, tools, plan, log)

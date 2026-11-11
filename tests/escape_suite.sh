@@ -54,10 +54,10 @@ deny "replace the limit list"          'mv "$PITHOS_LIMIT_EVENTS" /run/pithos/z'
 deny "replace the blocked-files list"  'mv "$PITHOS_BLOCKED_FILES" /run/pithos/y'
 deny "see the trace FIFO's fd"        'ls -l /proc/*/fd 2>/dev/null | grep -q "trace.fifo"'
 deny "publish socket without --publish" 'test -e /run/pithos/publish.sock'
-cat "$(printf '/opt/pithos-a\n/opt/forged\tnot mounted')" 2>/dev/null
+cat "$(printf '/pithos-a\nforged\tnot mounted')" 2>/dev/null  # one level: shown whole
 cat /opt/pithos-probe 2>/dev/null
 sleep 1  # the launcher reads strace's output asynchronously
-deny "forge a line in the blocked-files list" 'grep -qx "/opt/forged	not mounted" "$PITHOS_BLOCKED_FILES"'
+deny "forge a line in the blocked-files list" 'grep -qx "forged	not mounted" "$PITHOS_BLOCKED_FILES"'
 
 deny "raise the process limit"        'ulimit -Hu $(( $(ulimit -Hu) + 1 ))'
 deny "lift the scope's memory limit"  'echo max > "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max"'
@@ -86,10 +86,10 @@ allow "blocked host is reported"      'grep -q "^example.com:443" "$PITHOS_BLOCK
 allow "agent is told about blocks"    'grep -q "pithos allow" ~/.claude/CLAUDE.md'
 allow "agent is told about files"     'grep -q "$PITHOS_BLOCKED_FILES" ~/.claude/CLAUDE.md'
 allow "agent is told about limits"    'grep -q "$PITHOS_LIMIT_EVENTS" ~/.claude/CLAUDE.md'
-allow "unmounted file is reported"    'grep -qx "/opt/pithos-probe	not mounted" "$PITHOS_BLOCKED_FILES"'
+allow "unmounted file is reported"    'grep -qx "/opt	not mounted" "$PITHOS_BLOCKED_FILES"'
 allow "read-only write is reported"   'grep -qx "/usr/escape	read-only" "$PITHOS_BLOCKED_FILES"'
 allow "secret probe is reported as hidden" 'grep -q "/\.ssh.*	hidden on purpose$" "$PITHOS_BLOCKED_FILES"'
-allow "escaped newline stays escaped" 'grep -qF "/opt/pithos-a\\x0a/opt/forged\\x09not mounted	not mounted" "$PITHOS_BLOCKED_FILES"'
+allow "escaped newline stays escaped" 'grep -qF "/pithos-a\\x0aforged\\x09not mounted	not mounted" "$PITHOS_BLOCKED_FILES"'
 allow "HTTPS to allowed host"         'test "$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 https://api.anthropic.com/v1/models)" = 401'
 allow "write in project"              'echo ok > written-inside.txt'
 allow "git works"                     'git status'

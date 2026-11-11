@@ -442,8 +442,9 @@ class Binds(Fixture):
 
     def start_agent(self, run, plan=None):
         with mock.patch.object(sb.subprocess, "run", run):
-            return sb.start_ssh_agent(self.SSH, self.project, self.paths, self.runtime,
-                                      plan or sb.Plan())
+            plan = plan or sb.Plan()
+            plan.runtime = self.runtime
+            return sb.start_ssh_agent(self.SSH, self.project, self.paths, plan)
 
     def write_known_hosts(self):
         with open(os.path.join(self.home, ".ssh", "known_hosts"), "w") as f:
@@ -831,6 +832,24 @@ class AllowCommand(Fixture):
                     self.run_allow("--save", "example.com")
                 with open(self.paths.allowed) as f:
                     self.assertEqual(f.read(), text)
+
+    def test_one_damaged_file_changes_nothing_anywhere(self):
+        self.session("s1")
+        self.session("s2")
+        with open(self.paths.session_file("s2"), "w") as f:
+            json.dump({"pid": os.getpid(), "project": self.project, "allow": "x"}, f)
+        with self.assertRaisesRegex(config.ConfigError, "damaged"):
+            self.run_allow("--save", "example.com")
+        self.assertEqual(self.session_allow("s1"), [])
+        self.assertFalse(os.path.exists(self.paths.allowed))
+        # A damaged saved list leaves the sessions alone too.
+        self.session("s2")
+        with open(self.paths.allowed, "w") as f:
+            f.write("{broken")
+        for argv in (["--save", "example.com"], ["--remove", "example.com"]):
+            with self.subTest(argv=argv), self.assertRaisesRegex(config.ConfigError, "damaged"):
+                self.run_allow(*argv)
+            self.assertEqual(self.session_allow("s1"), [])
 
     def test_flag_combinations(self):
         for argv in (["--save"], ["--remove"], ["--list", "x.com"], ["--save", "--remove", "x.com"]):
@@ -1386,6 +1405,15 @@ class FileNotice(Fixture):
     def test_dry_run_changes_nothing_on_the_host(self):
         self.dry_run()
         self.assertFalse(os.path.exists(self.paths.state))
+
+    def test_dry_run_shows_the_ssh_agent(self):
+        self.assertNotIn("ssh-agent.sock", self.dry_run()[0])
+        self.write_profile("base", '[ssh]\nkey = "~/id"\n[fs]\nrw = ["{project}"]\n')
+        with mock.patch.object(sb.subprocess, "run", side_effect=AssertionError("ran")):
+            out, _ = self.dry_run()
+        self.assertIn("/run/pithos/ssh-agent.sock", out)
+        self.assertIn("/run/pithos/known_hosts", out)
+        self.assertIn("--setenv GIT_SSH_COMMAND", out)
 
     def test_missing_strace_only_warns(self):
         out, err = self.dry_run(strace=False)

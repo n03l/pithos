@@ -17,6 +17,7 @@ import re
 import secrets
 import socket
 import threading
+import time
 
 from config import ConfigError, clean
 
@@ -108,11 +109,17 @@ def _respond(conn, status, reason):
 
 
 def _read_head(conn):
-    """The request head up to and including the blank line, plus anything after it."""
+    """The request head up to and including the blank line, plus anything after it.
+    HEAD_TIMEOUT is for the whole head: a byte every few seconds must not hold a slot."""
+    deadline = time.monotonic() + HEAD_TIMEOUT
     data = b""
     while b"\r\n\r\n" not in data:
         if len(data) > HEAD_LIMIT:
             raise OverflowError
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise socket.timeout
+        conn.settimeout(left)
         chunk = conn.recv(4096)
         if not chunk:
             raise ConnectionError
@@ -217,7 +224,6 @@ class PublishServer:
     def _serve(self, conn, peer):
         upstream = None
         try:
-            conn.settimeout(HEAD_TIMEOUT)
             try:
                 data = _read_head(conn)
             except OverflowError:

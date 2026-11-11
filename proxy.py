@@ -25,6 +25,8 @@ NOT_LISTED = "not in net.allow"
 NON_PUBLIC = "resolves to a non-public address"
 SNI_MISMATCH = "TLS SNI does not match the CONNECT host"
 BLOCKED_LIMIT = 200
+LOG_LIMIT = 50 << 20  # bytes per session log
+DROPPED_HEADERS = ("connection", "keep-alive", "host")  # and proxy-*
 
 _LABEL = re.compile(r"^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$")
 
@@ -245,17 +247,29 @@ def parse_client_hello_sni(record):
 
 
 class Logger:
-    def __init__(self, path):
-        self.path = path
+    """The session log, on the host. The sandbox triggers most events, so it is capped: past
+    `limit` bytes one "log_truncated" event is written, then nothing."""
+
+    def __init__(self, path, limit=LOG_LIMIT):
+        self.path, self.limit = path, limit
         self.lock = threading.Lock()
+        self.size = 0
+        self.full = False
 
     def __call__(self, **event):
         if self.path is None:
             return
-        event = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **event}
-        line = json.dumps(event, ensure_ascii=True) + "\n"
-        with self.lock, open(self.path, "a", encoding="ascii") as f:
-            f.write(line)
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        line = json.dumps({"ts": ts, **event}, ensure_ascii=True) + "\n"
+        with self.lock:
+            if self.full:
+                return
+            if self.size + len(line) > self.limit:
+                self.full = True
+                line = json.dumps({"ts": ts, "action": "log_truncated"}) + "\n"
+            self.size += len(line)
+            with open(self.path, "a", encoding="ascii") as f:
+                f.write(line)
 
 
 def append_line(path, line):
@@ -485,15 +499,24 @@ class ProxyServer:
             raise Denied(400, str(e))
         if url.username or url.password:
             raise Denied(400, "credentials in URL are not supported")
+        # Host comes from the checked URL: a CDN routes by it, so the client's own would reach
+        # any site sharing the listed host's servers.
+        kept = []
+        for line in filter(None, header_lines):
+            if line[0] in " \t":
+                raise Denied(400, "folded header lines are not supported")
+            name = line.split(":", 1)[0].strip().lower()
+            if not name.startswith("proxy-") and name not in DROPPED_HEADERS:
+                kept.append(line)
         kind, host = self._check(raw_host, port)
+        netloc = live_entry(host, port) if port != 80 else f"[{host}]" if ":" in host else host
+        path = url.path or "/"
+        if url.query:
+            path += "?" + url.query
+        head = "\r\n".join([f"{method} {path} {version}", f"Host: {netloc}", *kept,
+                            "Connection: close", "", ""])
         up_reader, up_writer = await self._open_upstream(kind, host, port)
         try:
-            path = url.path or "/"
-            if url.query:
-                path += "?" + url.query
-            kept = [h for h in header_lines if h and not h.lower().startswith(
-                ("proxy-", "connection:", "keep-alive:"))]
-            head = "\r\n".join([f"{method} {path} {version}", *kept, "Connection: close", "", ""])
             self.log(action="allow", host=host, port=port, method=method)
             up_writer.write(head.encode("latin-1"))
             await self._pipe_both(reader, writer, up_reader, up_writer)

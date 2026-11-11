@@ -383,7 +383,8 @@ on allowlisted hosts.
 ## Reviewing a session
 
 Each session leaves a proxy log, `<session>.jsonl`, in `~/.local/state/pithos/logs/`. It is
-written from outside the sandbox, which can't reach that directory.
+written from outside the sandbox, which can't reach that directory. It stops at 50 MB, so a
+sandbox making endless requests can't fill your disk; `pithos report` says when a log was cut.
 
 ```sh
 pithos report                         # the latest session
