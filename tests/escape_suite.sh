@@ -60,7 +60,7 @@ sleep 1  # the launcher reads strace's output asynchronously
 deny "forge a line in the blocked-files list" 'grep -qx "/opt/forged	not mounted" "$PITHOS_BLOCKED_FILES"'
 
 deny "raise the process limit"        'ulimit -Hu $(( $(ulimit -Hu) + 1 ))'
-deny "remove the memory limit"        'ulimit -Hd unlimited'
+deny "lift the scope's memory limit"  'echo max > "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max"'
 deny "enable core dumps"              'ulimit -c 1'
 deny "write to the sandbox root"      'touch /escape-root'
 deny "write to /dev"                  'touch /dev/escape'

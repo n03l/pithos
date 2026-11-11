@@ -204,7 +204,7 @@ exactly and immediately:
 | `total` | 75% of RAM | `MemoryMax` for the scope, swap excluded. Files in tmpfs count |
 | `processes` | 15% of `ulimit -u`, at least 512 | `TasksMax`. Threads count too, and a refused start is refused, not killed |
 | `cpu` | `100%` (all the CPUs, so no quota) | `CPUQuota`, in percent of one CPU, like systemd: `"200%"` is two CPUs |
-| `memory` | 50% of RAM, per process | `RLIMIT_DATA`, inside the sandbox |
+| `memory` | 50% of RAM, per process, only with `--no-limits` | `RLIMIT_DATA`, inside the sandbox. In a scope `total` does this job, see below |
 | `tmpfs` | 25% of RAM, for each of `~`, `/tmp`, `/var/tmp`, `/dev/shm` | Sized tmpfs mounts (they are RAM). `/` and `/dev` are read-only |
 
 `systemd-run --user --scope` creates the scope, so `pithos` needs a systemd user session:
@@ -227,9 +227,14 @@ tmpfs = "10%"
 cpu = "200%"          # percent of one CPU, "2" for two CPUs, or "none"
 ```
 
-Values above what the machine has are lowered, with a warning, and so is a per-process
-`memory` above `total`, which could never be reached before the sandbox limit. `pithos -v` prints
-the values in use, and `pithos --dry-run` shows the `systemd-run` line.
+Values above what the machine has are lowered, with a warning. `pithos -v` prints the values in
+use, and `pithos --dry-run` shows the `systemd-run` line.
+
+`memory` only applies with `--no-limits`. `RLIMIT_DATA` counts address space a process reserves,
+not memory it uses, and runtimes such as Node reserve gigabytes at startup that they never touch:
+a Vite build that uses 600 MB failed under a 3.75 GB `RLIMIT_DATA` with "Fatal process out of
+memory: Failed to reserve virtual memory". In a scope, `total` limits memory actually used, and
+the kernel kills the process that grew too far.
 
 ### When a limit is hit
 
@@ -353,7 +358,7 @@ on allowlisted hosts.
 | Domain fronting | On port 443 the TLS SNI must equal the host in `CONNECT`. |
 | Web pages driving a published server | `--publish` checks `Host`, `Origin` and `Sec-Fetch-Site` on the host, before anything reaches the sandbox. Only the command line can publish a port. |
 | Host sockets (D-Bus, ssh-agent, docker, X11) | `/run`, `/tmp` and `$XDG_RUNTIME_DIR` are fresh in the sandbox. |
-| Fork bombs, runaway memory, filling `/tmp` | The sandbox runs in a systemd scope with `TasksMax`, `MemoryMax` and `CPUQuota`, plus per-process memory and tmpfs limits; see [Resource limits](#resource-limits). |
+| Fork bombs, runaway memory, filling `/tmp` | The sandbox runs in a systemd scope with `TasksMax`, `MemoryMax` and `CPUQuota`, plus tmpfs limits; see [Resource limits](#resource-limits). |
 | Escaping via namespaces or the terminal | `--disable-userns`, its own PID namespace, `--new-session` unless the kernel already blocks TIOCSTI. |
 
 ### Limits to keep in mind

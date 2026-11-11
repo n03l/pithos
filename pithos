@@ -854,7 +854,7 @@ def cmd_run(args, paths):
     except ValueError as e:
         raise ConfigError(f"net.allow: {e}")
     tools = find_tools(args, cfg)
-    limits, warnings = resolve_limits(cfg, read_machine())
+    limits, warnings = resolve_limits(cfg, read_machine(), scoped=bool(tools.systemd_run))
     for warning in warnings:
         note(f"WARNING: {warning}")
 

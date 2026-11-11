@@ -35,7 +35,7 @@ Flat on purpose: no package directory. Use only the Python standard library (3.1
 - `tests/`: unit tests (`test_config.py`, `test_proxy.py`, `test_publish.py`), the escape suite
   (`escape_suite.sh` runs inside the sandbox, `run_escape_suite.sh` drives it from the host) and
   `stress_limits.py`, a bounded end-to-end stress test of the scope limits (fork storm, OOM kill,
-  per-process limit, tmpfs, CPU quota, signals, concurrent sessions).
+  reserved address space, tmpfs, CPU quota, signals, concurrent sessions).
 
 ## Commands
 
@@ -137,10 +137,9 @@ Any change that touches one of these needs a test, both a hostile case and a nor
   is setup done by `bwrap` and is ignored.
 - **Resource limits can't be loosened from inside.** Every writable tmpfs is sized, and `/` and
   `/dev` (the unsized tmpfs that `bwrap` mounts) are remounted read-only after every mount.
-  `bridge.py` sets soft and hard rlimits equal (`RLIMIT_CORE` 0, `RLIMIT_DATA`, and
-  `RLIMIT_NPROC` with
-  `--no-limits`), never above an existing hard limit. `[limits]` is profile-only: `.pithos.toml`
-  may not set it, and `--no-limits` is command line only. The limits themselves are the kernel's,
+  `bridge.py` sets soft and hard rlimits equal (`RLIMIT_CORE` 0, and `RLIMIT_DATA` and
+  `RLIMIT_NPROC` with `--no-limits`), never above an existing hard limit. `[limits]` is
+  profile-only: `.pithos.toml` may not set it, and `--no-limits` is command line only. The limits themselves are the kernel's,
   through a systemd scope; `systemd-run` is only taken from `/usr/bin` or `/bin`, never `PATH`.
   Without a scope `pithos` refuses to start unless `--no-limits`, so a broken systemd setup fails
   closed instead of silently dropping the memory limit.
@@ -184,6 +183,11 @@ Any change that touches one of these needs a test, both a hostile case and a nor
   Linux 5.14 it counts tasks per user namespace. Set in the launcher, the fork that `bwrap` makes
   is checked against all of the user's processes and fails. With a scope, `TasksMax` does the
   job and the kernel reports it in `pids.events`.
+- `RLIMIT_DATA` (`limits.memory`) is set only with `--no-limits` (`resolve_limits` drops it in a
+  scope). It counts reserved address space, not memory used: Node 24 reserves more than 3.75 GB
+  at startup and dies with "Failed to reserve virtual memory for CodeRange" under a limit far
+  above its real use, and the failure never shows in `memory.events`, so the agent isn't told.
+  `MemoryMax` limits real use and reports its kills.
 - A transient scope must get `-p OOMPolicy=continue`. Default `stop` fails the unit when the
   OOM killer fires and systemd then SIGTERMs everything in it: the session ends and the agent
   can never report it (seen in testing: exit 143). With `continue`, only the offending

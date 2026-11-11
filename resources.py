@@ -124,19 +124,18 @@ def parse_limit(key, value, machine, warnings):
     return None if key == "cpu" and amount >= base else amount
 
 
-def resolve_limits(cfg, machine):
+def resolve_limits(cfg, machine, scoped):
     """({key: amount or None}, warnings). Missing keys get DEFAULT_LIMITS."""
     given = cfg.get("limits", {})
     warnings = []
     limits = {key: parse_limit(key, given.get(key, DEFAULT_LIMITS[key]), machine, warnings)
               for key in LIMIT_KEYS}
-    # A per-process ceiling above the sandbox's own can never be reached: the whole sandbox
-    # hits its limit first. Say so instead of leaving dead config.
-    if limits["memory"] and limits["total"] and limits["memory"] > limits["total"]:
-        warnings.append(f"limits.memory: {describe_amount('memory', limits['memory'])} is more "
-                        f"than the sandbox's total ({describe_amount('total', limits['total'])}), "
-                        f"using {describe_amount('total', limits['total'])}")
-        limits["memory"] = limits["total"]
+    # The per-process limit is RLIMIT_DATA, which counts address space reserved, not memory
+    # used: Node reserves gigabytes it never touches, and dies at startup under a limit far
+    # above what it uses. In a scope, MemoryMax limits real memory and its OOM kills are
+    # reported, so RLIMIT_DATA is only the fallback for --no-limits.
+    if scoped:
+        limits["memory"] = None
     return limits, warnings
 
 

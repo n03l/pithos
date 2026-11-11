@@ -104,19 +104,22 @@ echo "alive"; sleep 1; cat "$PITHOS_LIMIT_EVENTS" """, total="512M", memory="512
               env={**os.environ, "PITHOS_STATE": STATE, "PITHOS_CONFIG": CFG}).stdout)
 
 
-def per_process_memory():
-    """One process above RLIMIT_DATA but below the total: a catchable MemoryError, not a kill."""
+def reserved_address_space():
+    """4 GB reserved but never touched, as Node does at startup, against a 1 GB total and a
+    128 MB per-process setting: a scope limits memory used, not address space reserved."""
     done, _ = pithos("""
 python3 -I -c '
+import mmap
 try:
-    b = bytearray(200 << 20)
-    print("allocated: limit NOT enforced")
-except MemoryError:
-    print("MemoryError")
+    m = mmap.mmap(-1, 4 << 30, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+    print("reserved")
+except OSError as e:
+    print("refused", e.strerror)
 '
 echo alive""", total="1G", memory="128M")
-    check("per-process limit gives MemoryError, not a kill",
-          "MemoryError" in done.stdout and "alive" in done.stdout and done.returncode == 0)
+    check("reserving address space is not limited in a scope",
+          "reserved" in done.stdout and "alive" in done.stdout and done.returncode == 0,
+          done.stdout.strip().replace("\n", " "))
 
 
 def tmpfs():
@@ -262,7 +265,7 @@ def report():
 if __name__ == "__main__":
     setup()
     try:
-        for scenario in (forks, memory, per_process_memory, tmpfs, readonly, cpu, exit_codes,
+        for scenario in (forks, memory, reserved_address_space, tmpfs, readonly, cpu, exit_codes,
                          tmpfs_counts_toward_total, signals, concurrency):
             print(f"--- {scenario.__name__}")
             scenario()

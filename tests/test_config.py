@@ -1575,21 +1575,21 @@ GB = 1 << 30
 class Limits(Fixture):
     MACHINE = resources.Machine(ram=8 * GB, tasks=30000, cpus=8)
 
-    def resolve(self, **given):
-        return resources.resolve_limits({"limits": given}, self.MACHINE)
+    def resolve(self, scoped=False, **given):
+        return resources.resolve_limits({"limits": given}, self.MACHINE, scoped)
 
     def test_defaults_scale_with_the_machine(self):
         limits, warnings = self.resolve()
         self.assertEqual(limits, {"processes": 4500, "memory": 4 * GB, "total": 6 * GB,
                                   "tmpfs": 2 * GB, "cpu": None})  # 100% of the CPUs: no quota
         self.assertEqual(warnings, [])
-        small, _ = resources.resolve_limits({}, resources.Machine(ram=GB, tasks=1000))
+        small, _ = resources.resolve_limits({}, resources.Machine(ram=GB, tasks=1000), False)
         self.assertEqual(small["processes"], 512)  # floor
         self.assertEqual(small["memory"], GB)  # floor, but never above the machine
 
     def test_values(self):
         cases = {("processes", 4096): 4096, ("processes", "4096"): 4096,
-                 ("processes", "10%"): 3000, ("memory", "16G"): 6 * GB,  # the machine, then the default total
+                 ("processes", "10%"): 3000, ("memory", "16G"): 8 * GB,  # never more than the machine
                  ("memory", "1536M"): 1536 << 20, ("memory", 3 * GB): 3 * GB,
                  ("total", "12.5%"): GB, ("tmpfs", "100M"): 100 << 20,
                  ("tmpfs", "1K"): 1 << 10, ("memory", "none"): None}
@@ -1597,15 +1597,17 @@ class Limits(Fixture):
             with self.subTest(key=key, value=value):
                 self.assertEqual(self.resolve(**{key: value})[0][key], expected)
 
-    def test_per_process_limit_is_clamped_to_the_total(self):
-        limits, warnings = self.resolve(memory="6G", total="1G")
-        self.assertEqual(limits["memory"], GB)
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("limits.memory", warnings[0])
-        self.assertIn("the sandbox's total", warnings[0])
-        # Not clamped when there is no total, or when the total is the larger one.
-        self.assertEqual(self.resolve(memory="6G", total="none")[0]["memory"], 6 * GB)
-        self.assertEqual(self.resolve(memory="1G", total="6G")[0]["memory"], GB)
+    def test_per_process_limit_only_without_a_scope(self):
+        # RLIMIT_DATA counts reserved address space: Node 24 reserves more than 3.75G at
+        # startup while using under 1G, so a scope relies on MemoryMax alone.
+        for given in ({}, {"memory": "6G"}, {"memory": "1G", "total": "none"}):
+            with self.subTest(given=given):
+                limits, warnings = self.resolve(scoped=True, **given)
+                self.assertIsNone(limits["memory"])
+                self.assertEqual(warnings, [])
+        self.assertEqual(self.resolve(memory="6G", total="1G")[0]["memory"], 6 * GB)  # unscoped
+        with self.assertRaisesRegex(config.ConfigError, "limits.memory"):
+            self.resolve(scoped=True, memory="abc")  # still checked
 
     def test_floors_only_lift_the_percentage_defaults(self):
         self.assertEqual(self.resolve(tmpfs="1M")[0]["tmpfs"], 1 << 20)  # explicit: as given
@@ -1614,8 +1616,8 @@ class Limits(Fixture):
 
     def test_more_than_the_machine_is_lowered_with_a_warning(self):
         limits, warnings = self.resolve(memory="64G", processes=10 ** 6)
-        self.assertEqual((limits["memory"], limits["processes"]), (6 * GB, 30000))
-        self.assertEqual(len(warnings), 3)  # machine for memory, then total, then processes
+        self.assertEqual((limits["memory"], limits["processes"]), (8 * GB, 30000))
+        self.assertEqual(len(warnings), 2)
         self.assertTrue(any("limits.memory" in w for w in warnings))
 
     def test_bad_values(self):
@@ -1642,7 +1644,7 @@ class Limits(Fixture):
     def test_profile_values_override_defaults(self):
         self.write_profile("child", 'extends = "base"\n[limits]\ntotal = "none"\n')
         cfg = config.load_profile(self.paths, "child")
-        self.assertIsNone(resources.resolve_limits(cfg, self.MACHINE)[0]["total"])
+        self.assertIsNone(resources.resolve_limits(cfg, self.MACHINE, False)[0]["total"])
 
     def write(self, path, text):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1667,7 +1669,7 @@ class Limits(Fixture):
             resources.read_machine(proc, sysfs)
 
     def limited_argv(self):
-        limits, _ = self.resolve()
+        limits, _ = self.resolve(scoped=True)
         plan = sb.build_plan(config.load_profile(self.paths, "base"), self.project, self.paths,
                              self.runtime, {}, limits=limits)
         return plan, self.argv(plan)
@@ -1691,8 +1693,10 @@ class Limits(Fixture):
         self.assertIn("--remount-ro", unlimited)
 
     def test_bridge_gets_the_rlimits(self):
-        _, argv = self.limited_argv()
-        self.assertIn(f"core=0,data={4 * GB}", argv)  # processes: the scope's TasksMax
+        plan, argv = self.limited_argv()
+        # memory: the scope's MemoryMax; processes: its TasksMax
+        self.assertIn(resources.bridge_limits(plan.limits, plan.scoped), argv)
+        self.assertEqual(resources.bridge_limits(plan.limits, plan.scoped), "core=0")
         limits, _ = self.resolve()
         self.assertEqual(resources.bridge_limits(limits, scoped=False), f"core=0,nproc=4500,data={4 * GB}")
         self.assertEqual(resources.bridge_limits(None), "core=0")
@@ -1740,11 +1744,11 @@ class Scope(Fixture):
                  "64": None, "none": None}
         for value, expected in cases.items():
             with self.subTest(value=value):
-                limits, _ = resources.resolve_limits({"limits": {"cpu": value}}, self.MACHINE)
+                limits, _ = resources.resolve_limits({"limits": {"cpu": value}}, self.MACHINE, True)
                 self.assertEqual(limits["cpu"], expected)
         for bad in ("2G", "1.5", "-1", "0%", "x"):
             with self.subTest(bad=bad), self.assertRaisesRegex(config.ConfigError, "limits.cpu"):
-                resources.resolve_limits({"limits": {"cpu": bad}}, self.MACHINE)
+                resources.resolve_limits({"limits": {"cpu": bad}}, self.MACHINE, True)
 
     def test_scope_argv(self):
         limits = {"processes": 4500, "memory": GB, "total": 6 * GB, "tmpfs": GB, "cpu": 200}
