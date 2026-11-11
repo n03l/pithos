@@ -254,11 +254,13 @@ class Logger:
 
     - An event already logged is only counted. flush() (every LOG_FLUSH_SECONDS, and at the
       end of the session) writes one line per such event with "repeated": N. At most `keys`
-      events are counted; past that, new ones are written each time.
+      events, and `tail_limit` / 4 bytes of them, are counted; past that, new ones are written
+      each time. The byte cap keeps one flush under half a tail, so it can't rotate what came
+      before it out of both tail files.
     - Past `limit` bytes the head gets one "log_truncated" event, and later lines go to
       `path`.tail. A full tail replaces `path`.tail.old, so a flood can't push the end of the
       session out: the log keeps its start and its last `tail_limit` to 2 * `tail_limit` bytes.
-      flush() writes "log_dropped" with the number of lines lost that way."""
+      flush() writes "log_dropped" with the running total of lines lost that way."""
 
     def __init__(self, path, limit=LOG_LIMIT, tail_limit=TAIL_LIMIT, keys=LOG_KEYS_LIMIT,
                  clock=time.monotonic):
@@ -267,8 +269,10 @@ class Logger:
         self.lock = threading.Lock()
         self.size = 0
         self.full = False
-        self.tail_size = self.tail_lines = self.old_lines = self.dropped = 0
+        self.tail_size = self.tail_lines = self.old_lines = 0
+        self.dropped = self.reported = 0  # lines rotated away, in total and as last written
         self.counts = {}  # event as JSON, without its time -> repeats not written yet
+        self.key_bytes = 0
         self.last_flush = clock()
 
     def __call__(self, **event):
@@ -281,8 +285,10 @@ class Logger:
             if key in self.counts:
                 self.counts[key] += 1
                 return
-            if len(self.counts) < self.keys:
+            if len(self.counts) < self.keys and \
+                    self.key_bytes + len(key) <= self.tail_limit // 4:
                 self.counts[key] = 0
+                self.key_bytes += len(key)
             self._write(event)
 
     def flush(self):
@@ -298,9 +304,9 @@ class Logger:
             if n:
                 self._write({**json.loads(key), "repeated": n})
                 self.counts[key] = 0
-        if self.dropped:
-            dropped, self.dropped = self.dropped, 0
-            self._write({"action": "log_dropped", "count": dropped})
+        while self.reported != self.dropped:  # writing it can rotate the tail once more
+            self.reported = self.dropped
+            self._write({"action": "log_dropped", "count": self.dropped})
 
     def _write(self, event):
         ts = time.strftime("%Y-%m-%dT%H:%M:%S%z")

@@ -258,12 +258,51 @@ class LoggerTest(unittest.TestCase):
         log.flush()
         events = [*self.lines(), *self.lines(".tail.old"), *self.lines(".tail")]
         kept = [e for e in events if e["action"] == "deny"]
-        dropped = sum(e["count"] for e in events if e["action"] == "log_dropped")
+        dropped = max(e["count"] for e in events if e["action"] == "log_dropped")
         self.assertGreater(dropped, 0)
         self.assertEqual(len(kept) + dropped, total)
         self.assertEqual(kept[-1]["host"], f"h{total - 1}.test")  # the end is kept
         for suffix in (".tail", ".tail.old"):
             self.assertLessEqual(os.path.getsize(self.path + suffix), 1000)
+
+    def test_summaries_cannot_push_out_the_end(self):
+        """Counted repeats of long (escaped) hosts, flushed at the end, must not rotate the
+        session's last events out of both tail files."""
+        log = self.make(limit=2000, tail_limit=20000)
+        for n in range(200):
+            host = f"{n:03}" + "\xff" * 252  # 6 bytes each once escaped
+            self.deny(log, host)
+            self.deny(log, host)
+        log(action="allow", host="b.test", port=443)
+        log.flush()
+        log(action="exit", code=0)
+        log.flush()
+        actions = [e["action"] for e in report.read_session(self.path)]
+        self.assertIn("allow", actions)
+        self.assertEqual(actions[-1], "exit")
+
+    def test_key_table_is_capped_in_bytes(self):
+        log = self.make(tail_limit=4000)  # keys may take 1000 bytes
+        for n in range(50):
+            self.deny(log, f"{n:02}" + "x" * 100)
+        self.assertLessEqual(sum(map(len, log.counts)), 1000)
+        self.assertGreater(len(log.counts), 0)
+
+    def test_dropped_count_is_a_running_total(self):
+        log = self.make(limit=200, tail_limit=1000)
+        for n in range(30):
+            self.deny(log, f"h{n:02}.test")
+        log.flush()
+        for n in range(30, 60):
+            self.deny(log, f"h{n:02}.test")
+        log.flush()
+        events = [*self.lines(), *self.lines(".tail.old"), *self.lines(".tail")]
+        kept = [e for e in events if e["action"] == "deny"]
+        reported = max(e["count"] for e in events if e["action"] == "log_dropped")
+        # Lines, not events: the first flush's own log_dropped line may be among them.
+        self.assertIn(len(kept) + reported, (60, 61))
+        self.assertLess(reported, 60)
+        self.assertEqual(events[-1]["action"], "log_dropped")  # a flush's rotation is reported
 
     def test_no_path_writes_nothing(self):
         log = proxy.Logger(None)

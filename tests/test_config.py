@@ -1146,14 +1146,22 @@ class Report(Fixture):
     def test_cut_log_says_what_was_kept(self):
         self.write([self.start(), {"action": "log_truncated"}])
         with open(os.path.join(self.paths.logs, self.SID + ".jsonl.tail"), "w") as f:
-            for event in ({"action": "log_dropped", "count": 7},
+            for event in ({"action": "log_dropped", "count": 3},
+                          {"action": "log_dropped", "count": 7},  # a running total
                           {"action": "log_dropped", "count": "9"},
                           {"action": "log_dropped", "count": True}):
                 f.write(json.dumps(event) + "\n")
         out = self.report()
         self.assertIn("log cut at its size limit: 1 session(s); the start and the end were kept", out)
-        self.assertIn("events dropped from the middle: 7\n", out)
+        self.assertIn("log lines dropped from the middle: 7\n", out)
         self.assertNotIn("later events are missing", out)
+
+    def test_dropped_totals_add_up_across_sessions(self):
+        other = "20260102-120000-abc123"
+        for sid, counts in ((self.SID, (3, 7)), (other, (2,))):
+            self.write([self.start(), *({"action": "log_dropped", "count": n} for n in counts)],
+                       sid=sid)
+        self.assertIn("log lines dropped from the middle: 9\n", self.report("--all"))
 
     def test_no_limits_sessions_say_so(self):
         self.write([self.start(limits={"processes": 512, "memory": GB}, scoped=False)])

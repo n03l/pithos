@@ -140,6 +140,7 @@ def collect_logs(files):
         table[key] = table.get(key, 0) + n
 
     for path in files:
+        dropped = 0  # log_dropped is a running total: the session's largest one counts
         for event in read_session(path, data["stats"]):
             action, weight = event.get("action"), event_weight(event)
             data["last_ts"] = event.get("ts", data["last_ts"])
@@ -150,8 +151,8 @@ def collect_logs(files):
                 data["exits"].append(event)
             elif action == "log_truncated":
                 bump(data["stats"], "truncated")
-            elif action == "log_dropped" and type(event.get("count")) is int and event["count"] > 0:
-                bump(data["stats"], "dropped", event["count"])
+            elif action == "log_dropped" and type(event.get("count")) is int:
+                dropped = max(dropped, event["count"])
             elif action == "quarantine":
                 bump(data["quarantined"], str(event.get("path")), weight)
             elif action == "limit" and event.get("limit") in LIMIT_COUNTERS \
@@ -171,6 +172,8 @@ def collect_logs(files):
                         bump(data["offers"], offer, weight)
                 elif not reason.startswith("resolve failed"):
                     bump(data["violations"], f"{host}:{port}  {reason}", weight)
+        if dropped > 0:
+            bump(data["stats"], "dropped", dropped)
     return data
 
 
@@ -311,7 +314,7 @@ def print_report(paths, files, data, cfg, why, project):
         print(f"log cut at its size limit: {data['stats']['truncated']} session(s); "
               "the start and the end were kept")
     if data["stats"].get("dropped"):
-        print(f"events dropped from the middle: {data['stats']['dropped']}")
+        print(f"log lines dropped from the middle: {data['stats']['dropped']}")
     if cfg is None:
         print(clean(f"profile checks skipped: {why}"))
     else:
