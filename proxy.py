@@ -26,6 +26,9 @@ NON_PUBLIC = "resolves to a non-public address"
 SNI_MISMATCH = "TLS SNI does not match the CONNECT host"
 BLOCKED_LIMIT = 200
 LOG_LIMIT = 50 << 20  # bytes per session log
+TAIL_LIMIT = 5 << 20  # bytes per tail file, once the log is full
+LOG_KEYS_LIMIT = 10000  # distinct events whose repeats are counted instead of written
+LOG_FLUSH_SECONDS = 60  # how often counted repeats are written
 DROPPED_HEADERS = ("connection", "keep-alive", "host")  # and proxy-*
 
 _LABEL = re.compile(r"^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$")
@@ -247,29 +250,62 @@ def parse_client_hello_sni(record):
 
 
 class Logger:
-    """The session log, on the host. The sandbox triggers most events, so it is capped: past
-    `limit` bytes one "log_truncated" event is written, then nothing."""
+    """The session log, on the host. The sandbox triggers most events, so it is bounded:
 
-    def __init__(self, path, limit=LOG_LIMIT):
-        self.path, self.limit = path, limit
+    - An event already logged is only counted. flush() (every LOG_FLUSH_SECONDS, and at the
+      end of the session) writes one line per such event with "repeated": N. At most `keys`
+      events are counted; past that, new ones are written each time.
+    - Past `limit` bytes one "log_truncated" event is written, then nothing."""
+
+    def __init__(self, path, limit=LOG_LIMIT, tail_limit=TAIL_LIMIT, keys=LOG_KEYS_LIMIT,
+                 clock=time.monotonic):
+        self.path, self.limit, self.tail_limit, self.keys = path, limit, tail_limit, keys
+        self.clock = clock
         self.lock = threading.Lock()
         self.size = 0
         self.full = False
+        self.counts = {}  # event as JSON, without its time -> repeats not written yet
+        self.last_flush = clock()
 
     def __call__(self, **event):
         if self.path is None:
             return
+        key = json.dumps(event, sort_keys=True, ensure_ascii=True)
+        with self.lock:
+            if self.clock() - self.last_flush >= LOG_FLUSH_SECONDS:
+                self._flush()
+            if key in self.counts:
+                self.counts[key] += 1
+                return
+            if len(self.counts) < self.keys:
+                self.counts[key] = 0
+            self._write(event)
+
+    def flush(self):
+        """Write the repeats counted since the last flush."""
+        if self.path is None:
+            return
+        with self.lock:
+            self._flush()
+
+    def _flush(self):
+        self.last_flush = self.clock()
+        for key, n in self.counts.items():
+            if n:
+                self._write({**json.loads(key), "repeated": n})
+                self.counts[key] = 0
+
+    def _write(self, event):
+        if self.full:
+            return
         ts = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         line = json.dumps({"ts": ts, **event}, ensure_ascii=True) + "\n"
-        with self.lock:
-            if self.full:
-                return
-            if self.size + len(line) > self.limit:
-                self.full = True
-                line = json.dumps({"ts": ts, "action": "log_truncated"}) + "\n"
-            self.size += len(line)
-            with open(self.path, "a", encoding="ascii") as f:
-                f.write(line)
+        if self.size + len(line) > self.limit:
+            self.full = True
+            line = json.dumps({"ts": ts, "action": "log_truncated"}) + "\n"
+        self.size += len(line)
+        with open(self.path, "a", encoding="ascii") as f:
+            f.write(line)
 
 
 def append_line(path, line):

@@ -173,6 +173,76 @@ class BlockedListTest(unittest.TestCase):
             self.assertTrue(f.read().startswith("[2001:db8::1]:443\t"))
 
 
+class LoggerTest(unittest.TestCase):
+    def setUp(self):
+        self.path = os.path.join(scratch_dir(self), "s.jsonl")
+        self.now = [0.0]
+
+    def make(self, **kw):
+        return proxy.Logger(self.path, clock=lambda: self.now[0], **kw)
+
+    def lines(self, suffix=""):
+        try:
+            with open(self.path + suffix) as f:
+                return [json.loads(line) for line in f]
+        except FileNotFoundError:
+            return []
+
+    def deny(self, log, host="a.test"):
+        log(action="deny", host=host, port=443, reason=proxy.NOT_LISTED)
+
+    def test_repeats_become_one_counted_line(self):
+        log = self.make()
+        for _ in range(5):
+            self.deny(log)
+        self.assertEqual(len(self.lines()), 1)
+        log.flush()
+        first, summary = self.lines()
+        self.assertNotIn("repeated", first)
+        self.assertEqual(summary["repeated"], 4)
+        self.assertEqual({k: v for k, v in summary.items() if k not in ("ts", "repeated")},
+                         {k: v for k, v in first.items() if k != "ts"})
+
+    def test_flush_writes_pending_counts(self):
+        log = self.make()
+        self.deny(log)
+        self.deny(log)
+        self.now[0] = proxy.LOG_FLUSH_SECONDS - 1
+        self.deny(log, "b.test")
+        self.assertEqual(len(self.lines()), 2)  # not due yet
+        self.now[0] = proxy.LOG_FLUSH_SECONDS
+        log(action="exit", code=0)
+        self.assertEqual([(e["action"], e.get("repeated")) for e in self.lines()],
+                         [("deny", None), ("deny", None), ("deny", 1), ("exit", None)])
+
+    def test_flush_twice_writes_once(self):
+        log = self.make()
+        self.deny(log)
+        self.deny(log)
+        log.flush()
+        log.flush()
+        self.assertEqual(len(self.lines()), 2)
+        self.deny(log)  # counted again after a flush
+        log.flush()
+        self.assertEqual([e.get("repeated") for e in self.lines()], [None, 1, 1])
+
+    def test_key_table_is_capped(self):
+        log = self.make(keys=3)
+        for host in "abcde":
+            self.deny(log, f"{host}.test")
+            self.deny(log, f"{host}.test")
+        log.flush()
+        self.assertEqual([(e["host"][0], e.get("repeated")) for e in self.lines()],
+                         [("a", None), ("b", None), ("c", None), ("d", None), ("d", None),
+                          ("e", None), ("e", None), ("a", 1), ("b", 1), ("c", 1)])
+        self.assertEqual(len(log.counts), 3)
+
+    def test_no_path_writes_nothing(self):
+        log = proxy.Logger(None)
+        log(action="exit", code=0)
+        log.flush()
+
+
 class CappedFileTest(unittest.TestCase):
     def test_capped_then_closed(self):
         path = os.path.join(scratch_dir(self), "list")
@@ -404,8 +474,8 @@ class ProxyEndToEnd(unittest.TestCase):
     def test_log_is_capped(self):
         self.start(["other.test"])
         self.server.log.limit = 2000
-        for _ in range(30):
-            self.request(self.connect_line("echo.test"))
+        for n in range(30):  # distinct hosts: repeats of one would only be counted
+            self.request(self.connect_line(f"h{n}.test"))
         with open(self.log_path) as f:
             events = [json.loads(line) for line in f]
         self.assertLessEqual(os.path.getsize(self.log_path), 2000 + 100)  # + the last line
@@ -456,12 +526,14 @@ class ProxyEndToEnd(unittest.TestCase):
         self.put_live([])
         head, _ = self.request(self.connect_line("echo.test"))
         self.assertIn(b" 403 ", head)
+        self.server.log.flush()  # the second, identical denial is counted until a flush
         with open(self.log_path) as f:
             events = [json.loads(line) for line in f]
         self.assertEqual([e["entries"] for e in events if e["action"] == "live_allow"],
                          [[entry], []])
-        self.assertEqual([e["action"] for e in events if e.get("host") == "echo.test"],
-                         ["deny", "allow", "deny"])
+        self.assertEqual([(e["action"], e.get("repeated")) for e in events
+                          if e.get("host") == "echo.test"],
+                         [("deny", None), ("allow", None), ("deny", 1)])
 
     def test_live_host_still_needs_a_public_address(self):
         self.start_live(allow_private=False)

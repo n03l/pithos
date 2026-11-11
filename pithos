@@ -930,6 +930,7 @@ def run_session(args, paths, tools, cfg, plan, profile, cmd, allowlist):
         server = proxy.ProxyServer(live, log_path=os.path.join(paths.logs, session + ".jsonl"),
                                    blocked_path=os.path.join(runtime, "blocked-hosts"))
         live.log = log = server.log
+        cleanup.callback(log.flush)  # runs last: the counted repeats, after exit and quarantine
         log(action="start", profile=profile, project=project, cmd=cmd,
             rules=rule_snapshot(cfg), limits=limits, scoped=plan.scoped)
         live.refresh()
