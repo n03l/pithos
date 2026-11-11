@@ -40,6 +40,9 @@ sudo apt install strace          # optional: the file notice
 ./install.sh            # links ~/.local/bin/pithos, copies profiles to ~/.config/pithos
 ```
 
+For opencode, an optional plugin shows in the footer whether a session is sandboxed (see
+[opencode plugin: sandbox lock](#opencode-plugin-sandbox-lock)).
+
 `strace` is optional: without it, the agent isn't told which file accesses the sandbox refused
 (see [When a file is refused](#when-a-file-is-refused)). [Resource limits](#resource-limits) need
 a systemd user session: without one `pithos` refuses to start, unless you disable them.
@@ -324,6 +327,38 @@ sandbox the file is read-only.
 `claude` profile. Use plain `opencode` for other providers. opencode's connection list is per
 project, so this profile adds the `claude-agent` connection the first time opencode starts in a
 project (`agent.connect_claude_agent`; no secret is stored).
+
+### opencode plugin: sandbox lock
+
+`opencode-plugin/pithos-lock` adds a lock to opencode's footer: 🔒 with a green dot inside a
+`pithos` sandbox, 🔓 with a red dot outside. It shows the lock only when `PITHOS=1` is set and
+`/run/pithos/blocked-hosts` exists, so a stray `PITHOS=1` on the host still shows the open lock.
+Use it with `opencode --standalone`, where the TUI and the server that runs the tools share the
+sandbox.
+
+Install it by copying, not linking, into opencode's config dir, then list it in `cli.json`:
+
+```sh
+mkdir -p ~/.config/opencode/plugins
+cp -r opencode-plugin/pithos-lock ~/.config/opencode/plugins/
+```
+
+```json
+{ "plugins": ["/home/you/.config/opencode/plugins/pithos-lock"] }
+```
+
+Copy it for these reasons:
+
+- The `opencode` profile mounts `~/.config/opencode` read-only, so the sandbox can load the
+  copy but can't change it. A symlink back into this repo wouldn't resolve in the sandbox, and
+  when the project is this repo, the agent could edit the plugin to always show 🔒.
+- The plugin imports `@opencode/plugin/tui`, which resolves from opencode's config dir.
+
+Copy it again after pulling changes to `opencode-plugin/`.
+
+The lock is a hint, not a proof. An agent run outside the sandbox has your user rights and can
+edit the plugin or `cli.json` so that later sessions show 🔒. Keeping `~/.config/opencode` in
+git makes such an edit show up in `git status`.
 
 ## SSH
 

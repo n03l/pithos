@@ -35,6 +35,10 @@ Flat on purpose: no package directory. Use only the Python standard library (3.1
   `--publish` tokens, then execs the command. Keep it tiny and stdlib-only.
 - `profiles/*.toml`: default profiles (`base`, `claude`, `opencode`, `opencode-claude`).
   `install.sh` copies them to `~/.config/pithos/` and never overwrites the copies there.
+- `opencode-plugin/pithos-lock`: optional opencode TUI plugin (TypeScript, not part of the
+  launcher) that shows a lock when `PITHOS=1` and `/run/pithos/blocked-hosts` exists. It relies
+  on both: keep them if you change the environment or the mounts. Users copy it into
+  `~/.config/opencode/plugins/` (README), never symlink it.
 - `tests/`: unit tests (`test_config.py`, `test_proxy.py`, `test_publish.py`), the escape suite
   (`escape_suite.sh` runs inside the sandbox, `run_escape_suite.sh` drives it from the host) and
   `stress_limits.py`, a bounded end-to-end stress test of the scope limits (fork storm, OOM kill,

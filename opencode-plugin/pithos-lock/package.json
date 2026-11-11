@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-pithos-lock",
+  "version": "0.1.0",
+  "description": "Shows in the footer whether opencode runs inside a pithos sandbox",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    "./tui": "./src/tui.tsx"
+  },
+  "files": [
+    "src"
+  ]
+}
