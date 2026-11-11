@@ -19,7 +19,7 @@ Flat on purpose: no package directory. Use only the Python standard library (3.1
   agent (`LimitEvents`, `ScopeMonitor`).
 - `filetrace.py`: `strace` and its output, and the file notice for the agent (`SandboxView`,
   `BlockedFiles`, `TraceWatcher`).
-- `report.py`: `pithos report` and `--explain`, and the log parsing `allow` shares.
+- `report.py`: `pithos report`, and the log parsing `allow` shares.
 - `proxy.py`: host-side allowlisting proxy. It handles `CONNECT` tunnels with a TLS SNI check,
   plain `http://` forwarding and the JSON-lines log. `LiveAllowlist` adds hosts approved during
   a session by re-reading the state files when they change. `CappedFile` is the append-only,
@@ -154,14 +154,7 @@ Any change that touches one of these needs a test, both a hostile case and a nor
 - **The callable surface is closed.** `COMMANDS` and the proxy's accepted request forms are
   fixed. `tests/test_config.py::Surface` fails when a subcommand is added: review the new
   subcommand, then update the test.
-- **The report analyst stays boxed in.** `report --explain` feeds a model untrusted transcripts,
-  so it runs in the profile the session logged, with `--no-base-net`, which removes every host
-  `base` allows (opencode keeps `registry.npmjs.org`), in a scratch dir wiped each run. The logged
-  command only selects from the closed `EXPLAIN_AGENTS` table; Claude Code gets only its `Read`
-  tool. Transcript dirs are writable by earlier sandboxes: open them with `O_NOFOLLOW`, regular
-  files only. opencode's database is likewise
-  hostile and holds credentials: open only a private copy, through `open_hostile_sqlite`, and
-  read only `session_message`. Tuning output never suggests
+- **The report never suggests a secret.** `pithos report` tuning output never suggests
   sensitive paths, `~/.claude`, the config or state dirs.
 - **Untrusted text is sanitized before printing.** Log entries, host names and project files
   pass through `clean()` before reaching the terminal.

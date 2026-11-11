@@ -386,7 +386,6 @@ pithos --trace claude                 # record file accesses as well as network
 pithos report                         # the latest session
 pithos report --session 20260101-120000-abc123   # one session; the ID is the log's file name
 pithos report --all                   # every session combined
-pithos report --explain > notes.md    # report on stderr, the model's Markdown on stdout
 ```
 
 `pithos report` is offline and rule-based. Without a trace, the detailed file sections are
@@ -449,29 +448,6 @@ Tracing slows the program down. The trace includes full `execve` command lines, 
 as an argument ends up in it, but environment values don't. It is a debugging aid for tuning
 profiles, not a security audit: file opens made through `io_uring` don't appear, and each open is
 recorded rather than each read or write.
-
-### Explaining a session with a model
-
-`pithos report --explain` collects the conversation from the session's time window, from both
-Claude Code transcripts and opencode's history, and asks the agent that ran the session, using its
-default model and the same profile, which can be one of your own. Both come from the session's
-log. Only sessions that ran `claude` or `opencode` can be explained. It asks which findings look
-concerning, what the agent was doing at the time, and which allowlist changes the evidence
-supports. It works on one session at a time. The report and progress messages go to stderr,
-and stdout holds only the explanation in Markdown.
-
-The report and conversation text go to the model provider, so use it only where that's acceptable.
-Treat the answer as a lead to verify: the model read untrusted text and can misread the report.
-
-It starts a normal `pithos run`, so it needs the same systemd user session as any other run.
-
-The agent runs in a scratch directory wiped after each run. Its profile's hosts are used without
-the ones inherited from `base`, such as GitHub and PyPI, except that opencode keeps
-`registry.npmjs.org`, which supplies its provider. With `claude`, the only tool is `Read`. The
-agent's own profile still applies otherwise, so it can use that agent's login and reach its API
-hosts.
-opencode's history is read from a private copy of its database, found through the `XDG_DATA_HOME`
-the session logged at start, and only the messages are taken.
 
 ## Upgrading
 

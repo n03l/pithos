@@ -6,7 +6,7 @@
   pithos trust [-C PROJECT] [--yes]
   pithos log [--denied] [--files] [--all]
   pithos allow [-C PROJECT] [--save | --remove | --list] [HOST[:PORT] ...]
-  pithos report [--session ID | --all] [--explain]
+  pithos report [--session ID | --all]
 
 The sandbox sees only the paths its profile lists and has no network except an
 allowlisting proxy. Profiles live in ~/.config/pithos/<name>.toml; a project
@@ -51,9 +51,7 @@ from filetrace import (  # noqa: E402
     BlockedFiles, SandboxView, TRACE_FIFO, TRACE_GROUPS, TraceWatcher, create_trace_log,
     ptrace_allowed, strace_argv, sum_traces,
 )
-from report import (  # noqa: E402
-    EXPLAIN_OPENCODE_HOSTS, cmd_report, offerable_host, parse_events, rule_snapshot,
-)
+from report import cmd_report, offerable_host, parse_events, rule_snapshot  # noqa: E402
 
 COMMANDS = ("run", "trust", "log", "allow", "report")
 # The sandbox picks the names in the denied list: don't let it flood the prompt.
@@ -756,14 +754,6 @@ def resolve_project(value):
     return os.path.realpath(value or os.getcwd())
 
 
-def drop_base_hosts(cfg, paths, command):
-    """Leave the agent only its own hosts: a report analyst has no use for code hosts."""
-    base = set(load_profile(paths, "base").get("net", {}).get("allow", []))
-    keep = EXPLAIN_OPENCODE_HOSTS if command == "opencode" else ()
-    net = cfg.setdefault("net", {})
-    net["allow"] = [h for h in net.get("allow", []) if h not in base or h in keep]
-
-
 def pick_profile(profile, cmd, paths):
     """(profile, command). Without -p, the profile named after the command if there is one,
     else base; without a command, the profile's own agent (or a shell for base)."""
@@ -859,8 +849,6 @@ def cmd_run(args, paths):
     profile, cmd = pick_profile(args.profile, args.cmd, paths)
     spec = publish.parse_spec(args.publish, reserved=(PROXY_PORT,)) if args.publish else None
     cfg = merge(load_profile(paths, profile), load_project(paths, project))
-    if args.no_base_net:
-        drop_base_hosts(cfg, paths, os.path.basename(cmd[0]))
     try:
         allowlist = proxy.Allowlist(cfg.get("net", {}).get("allow", []))
     except ValueError as e:
@@ -943,8 +931,7 @@ def run_session(args, paths, tools, cfg, plan, profile, cmd, allowlist):
                                    blocked_path=os.path.join(runtime, "blocked-hosts"))
         live.log = log = server.log
         log(action="start", profile=profile, project=project, cmd=cmd,
-            data_home=plan.env.get("XDG_DATA_HOME"), rules=rule_snapshot(cfg), limits=limits,
-            scoped=plan.scoped)
+            rules=rule_snapshot(cfg), limits=limits, scoped=plan.scoped)
         live.refresh()
         for problem in live.problems:
             note(f"WARNING: {clean(problem)}")
@@ -1193,7 +1180,6 @@ def parse_args(argv):
         parser.add_argument("--publish", metavar="[IP:]PORT",
                             help="let the host reach a server inside the sandbox on PORT "
                                  "(on 127.0.0.1 unless IP is given)")
-        parser.add_argument("--no-base-net", action="store_true", help=argparse.SUPPRESS)
         parser.add_argument("-v", "--verbose", action="store_true")
         parser.add_argument("cmd", nargs=argparse.REMAINDER)
     elif command == "trust":
@@ -1210,9 +1196,6 @@ def parse_args(argv):
         which = parser.add_mutually_exclusive_group()
         which.add_argument("--session", metavar="ID", help="report on this session (default: latest)")
         which.add_argument("--all", action="store_true", help="combine all sessions")
-        parser.add_argument("--explain", action="store_true",
-                            help="add the reading of the session's own agent, sandboxed, using its "
-                                 "default model: report on stderr, Markdown on stdout")
     else:
         parser.add_argument("--denied", action="store_true", help="summarise denied hosts")
         parser.add_argument("--files", action="store_true",
