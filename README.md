@@ -391,6 +391,8 @@ requests can't fill your disk with it, or hide what it did last:
 - Past 50 MB, the log keeps its start and moves on to `<session>.jsonl.tail`, which keeps the
   last 5 to 10 MB of the session. `pithos report` says when a log was cut and how many events
   were dropped from the middle.
+- When the logs total more than 500 MB, the oldest sessions' logs are deleted as a new session
+  starts. Logs of sessions still running are kept.
 
 ```sh
 pithos report                         # the latest session

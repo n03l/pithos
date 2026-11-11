@@ -1037,6 +1037,77 @@ class CountedLog(Fixture):
         self.assertEqual(report.session_files(self.head), [self.head])
 
 
+class PruneLogs(unittest.TestCase):
+    IDS = [f"2026010{d}-120000-abc123" for d in range(1, 5)]  # oldest first
+
+    def setUp(self):
+        self.root = scratch_dir(self)
+        self.logs = os.path.join(self.root, "logs")
+        os.makedirs(self.logs)
+        for sid in self.IDS:  # 100 bytes each: 60 in the head, 40 in the tail
+            self.put(sid + ".jsonl", 60)
+            self.put(sid + ".jsonl.tail", 40)
+
+    def put(self, name, size, where=None):
+        with open(os.path.join(where or self.logs, name), "w") as f:
+            f.write("x" * size)
+
+    def left(self):
+        return sorted(os.listdir(self.logs))
+
+    def test_prune_removes_oldest_first(self):
+        self.assertEqual(report.prune_logs(self.logs, set(), limit=250), self.IDS[:2])
+        self.assertEqual(self.left(), sorted(f"{sid}.jsonl{s}" for sid in self.IDS[2:]
+                                             for s in ("", ".tail")))
+
+    def test_prune_keeps_running_sessions(self):
+        self.assertEqual(report.prune_logs(self.logs, {self.IDS[0]}, limit=250), self.IDS[1:3])
+        self.assertIn(self.IDS[0] + ".jsonl", self.left())
+
+    def test_prune_removes_old_tails_too(self):
+        self.put(self.IDS[0] + ".jsonl.tail.old", 10)
+        report.prune_logs(self.logs, set(), limit=350)
+        self.assertFalse(any(name.startswith(self.IDS[0]) for name in self.left()))
+
+    def test_prune_never_follows_links(self):
+        outside = os.path.join(self.root, "outside")
+        self.put("outside", 10000, where=self.root)
+        link = "20250101-120000-abc123.jsonl"
+        os.symlink(outside, os.path.join(self.logs, link))
+        self.assertEqual(report.prune_logs(self.logs, set(), limit=400), [])  # link not counted
+        self.assertEqual(os.path.getsize(outside), 10000)
+        self.assertIn(link, self.left())
+
+    def test_prune_ignores_other_files(self):
+        others = ["notes.txt", "20260101.jsonl", "20250101-120000-abc123.jsonl.bak",
+                  "20250101-120000-ABC123.jsonl"]
+        for name in others:
+            self.put(name, 10000)
+        os.mkdir(os.path.join(self.logs, "20250101-120000-abc124.jsonl"))
+        self.assertEqual(report.prune_logs(self.logs, set(), limit=400), [])
+        for name in others:
+            self.assertIn(name, self.left())
+
+    def test_prune_under_limit_does_nothing(self):
+        self.assertEqual(report.prune_logs(self.logs, set(), limit=400), [])
+        self.assertEqual(len(self.left()), 8)
+
+    def test_prune_missing_dir_returns_empty(self):
+        self.assertEqual(report.prune_logs(os.path.join(self.root, "none"), set()), [])
+
+    def test_prune_tolerates_files_already_gone(self):
+        real_unlink = os.unlink
+
+        def racing_unlink(name, *, dir_fd=None):
+            real_unlink(name, dir_fd=dir_fd)
+            if name.endswith(".jsonl"):  # another launcher removes the tail first
+                with contextlib.suppress(FileNotFoundError):
+                    real_unlink(name + ".tail", dir_fd=dir_fd)
+
+        with mock.patch.object(report.os, "unlink", racing_unlink):
+            self.assertEqual(report.prune_logs(self.logs, set(), limit=250), self.IDS[:2])
+
+
 class Report(Fixture):
     SID = "20260101-120000-abc123"
     EVIL = "<img src=x onerror=alert(1)>\x1b]52;c;evil\x07"

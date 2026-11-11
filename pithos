@@ -50,8 +50,8 @@ from resources import (  # noqa: E402
 from filetrace import (  # noqa: E402
     BlockedFiles, SandboxView, TRACE_FIFO, TraceWatcher, ptrace_allowed, strace_argv,
 )
-from report import (cmd_report, event_weight, offerable_host, read_session,  # noqa: E402
-                    rule_snapshot)
+from report import (LOGS_TOTAL_LIMIT, cmd_report, event_weight, offerable_host,  # noqa: E402
+                    prune_logs, read_session, rule_snapshot)
 
 COMMANDS = ("run", "trust", "log", "allow", "report")
 # The sandbox picks the names in the denied list: don't let it flood the prompt.
@@ -919,6 +919,12 @@ def run_session(args, paths, tools, cfg, plan, profile, cmd, allowlist):
     """Start the proxy and the helpers, run the sandbox, then clean up. Returns its exit code."""
     project, runtime, limits = plan.project, plan.runtime, plan.limits
     os.makedirs(paths.logs, mode=0o700, exist_ok=True)
+    try:
+        if removed := prune_logs(paths.logs, set(running_sessions(paths))):
+            note(f"removed the logs of {len(removed)} old session(s) to keep logs under "
+                 f"{LOGS_TOTAL_LIMIT >> 20} MB")
+    except OSError as e:
+        note(f"WARNING: could not prune old logs: {clean(str(e))}")
     make_dirs(plan)
     session = time.strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
     with contextlib.ExitStack() as cleanup:  # undoes each step below in reverse, however we exit

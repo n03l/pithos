@@ -24,9 +24,9 @@ Flat on purpose: no package directory. Use only the Python standard library (3.1
   plain `http://` forwarding (with the `Host` header taken from the checked URL) and the
   JSON-lines session log (`Logger`): repeated events are counted, not written again; past
   `LOG_LIMIT` it keeps its start and a rotating `.tail` / `.tail.old` (`TAIL_LIMIT` each), so a
-  flood can't hide the end of a session. Readers go through `report.read_session`. `LiveAllowlist` adds hosts approved during
-  a session by re-reading the state files when they change. `CappedFile` is the append-only,
-  capped writer behind all three lists the agent reads.
+  flood can't hide the end of a session. Readers go through `report.read_session`.
+  `LiveAllowlist` adds hosts approved during a session by re-reading the state files when they
+  change. `CappedFile` is the append-only, capped writer behind all three lists the agent reads.
 - `publish.py`: `--publish`, host side. It parses the value, checks the first request head of
   each connection, and pairs it with a connection the bridge opens to `publish.sock`
   (`PublishServer`).

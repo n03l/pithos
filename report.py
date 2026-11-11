@@ -5,6 +5,7 @@ Logs are written by or for the sandbox: every value read from them is checked be
 passed through clean() before printing.
 """
 
+import contextlib
 import glob
 import json
 import os
@@ -58,6 +59,43 @@ def event_weight(event):
     return n if type(n) is int and n >= 1 else 1
 
 
+LOGS_TOTAL_LIMIT = 500 << 20
+
+
+def prune_logs(logs, keep, limit=LOGS_TOTAL_LIMIT):
+    """Remove the logs of the oldest sessions not in `keep` until the session logs in `logs`
+    total at most `limit` bytes. Only regular files named like a session log are counted or
+    removed; links are never followed. Returns the session ids removed, oldest first."""
+    try:
+        fd = os.open(logs, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return []
+    removed = []
+    try:
+        sessions = {}  # id -> [names, bytes]
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                m = LOG_NAME.fullmatch(entry.name)
+                if m and entry.is_file(follow_symlinks=False):
+                    group = sessions.setdefault(m.group(1), [[], 0])
+                    group[0].append(entry.name)
+                    group[1] += entry.stat(follow_symlinks=False).st_size
+        total = sum(size for _, size in sessions.values())
+        for sid in sorted(sessions):
+            if total <= limit:
+                break
+            if sid in keep:
+                continue
+            for name in sessions[sid][0]:
+                with contextlib.suppress(FileNotFoundError):  # another launcher pruning too
+                    os.unlink(name, dir_fd=fd)
+            total -= sessions[sid][1]
+            removed.append(sid)
+    finally:
+        os.close(fd)
+    return removed
+
+
 def offerable_host(event):
     """(host, port) if this log event may be offered for approval, else None. The sandbox picks
     these names, so only well-formed host names refused for not being listed qualify."""
@@ -77,6 +115,7 @@ def offerable_host(event):
 
 REPORT_LIMIT = 30
 SESSION_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}", re.ASCII)
+LOG_NAME = re.compile(rf"({SESSION_ID.pattern})\.jsonl(?:\.tail|\.tail\.old)?", re.ASCII)
 
 
 def select_sessions(args, paths):
