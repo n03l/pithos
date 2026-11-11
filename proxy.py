@@ -255,7 +255,10 @@ class Logger:
     - An event already logged is only counted. flush() (every LOG_FLUSH_SECONDS, and at the
       end of the session) writes one line per such event with "repeated": N. At most `keys`
       events are counted; past that, new ones are written each time.
-    - Past `limit` bytes one "log_truncated" event is written, then nothing."""
+    - Past `limit` bytes the head gets one "log_truncated" event, and later lines go to
+      `path`.tail. A full tail replaces `path`.tail.old, so a flood can't push the end of the
+      session out: the log keeps its start and its last `tail_limit` to 2 * `tail_limit` bytes.
+      flush() writes "log_dropped" with the number of lines lost that way."""
 
     def __init__(self, path, limit=LOG_LIMIT, tail_limit=TAIL_LIMIT, keys=LOG_KEYS_LIMIT,
                  clock=time.monotonic):
@@ -264,6 +267,7 @@ class Logger:
         self.lock = threading.Lock()
         self.size = 0
         self.full = False
+        self.tail_size = self.tail_lines = self.old_lines = self.dropped = 0
         self.counts = {}  # event as JSON, without its time -> repeats not written yet
         self.last_flush = clock()
 
@@ -294,17 +298,32 @@ class Logger:
             if n:
                 self._write({**json.loads(key), "repeated": n})
                 self.counts[key] = 0
+        if self.dropped:
+            dropped, self.dropped = self.dropped, 0
+            self._write({"action": "log_dropped", "count": dropped})
 
     def _write(self, event):
-        if self.full:
-            return
         ts = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         line = json.dumps({"ts": ts, **event}, ensure_ascii=True) + "\n"
-        if self.size + len(line) > self.limit:
+        if not self.full and self.size + len(line) > self.limit:
             self.full = True
-            line = json.dumps({"ts": ts, "action": "log_truncated"}) + "\n"
-        self.size += len(line)
-        with open(self.path, "a", encoding="ascii") as f:
+            self._append(self.path, json.dumps({"ts": ts, "action": "log_truncated"}) + "\n")
+        if not self.full:
+            self.size += len(line)
+            self._append(self.path, line)
+            return
+        tail = self.path + ".tail"
+        if self.tail_lines and self.tail_size + len(line) > self.tail_limit:
+            os.replace(tail, tail + ".old")
+            self.dropped += self.old_lines
+            self.old_lines, self.tail_lines, self.tail_size = self.tail_lines, 0, 0
+        self.tail_size += len(line)
+        self.tail_lines += 1
+        self._append(tail, line)
+
+    @staticmethod
+    def _append(path, line):
+        with open(path, "a", encoding="ascii") as f:
             f.write(line)
 
 

@@ -1072,6 +1072,18 @@ class Report(Fixture):
     def test_no_sessions(self):
         self.assertEqual(self.report(), "no sessions logged yet\n")
 
+    def test_cut_log_says_what_was_kept(self):
+        self.write([self.start(), {"action": "log_truncated"}])
+        with open(os.path.join(self.paths.logs, self.SID + ".jsonl.tail"), "w") as f:
+            for event in ({"action": "log_dropped", "count": 7},
+                          {"action": "log_dropped", "count": "9"},
+                          {"action": "log_dropped", "count": True}):
+                f.write(json.dumps(event) + "\n")
+        out = self.report()
+        self.assertIn("log cut at its size limit: 1 session(s); the start and the end were kept", out)
+        self.assertIn("events dropped from the middle: 7\n", out)
+        self.assertNotIn("later events are missing", out)
+
     def test_no_limits_sessions_say_so(self):
         self.write([self.start(limits={"processes": 512, "memory": GB}, scoped=False)])
         self.assertIn("not enforced: --no-limits", self.report())

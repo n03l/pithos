@@ -111,6 +111,8 @@ def collect_logs(files):
                 data["exits"].append(event)
             elif action == "log_truncated":
                 bump(data["stats"], "truncated")
+            elif action == "log_dropped" and type(event.get("count")) is int and event["count"] > 0:
+                bump(data["stats"], "dropped", event["count"])
             elif action == "quarantine":
                 bump(data["quarantined"], str(event.get("path")), weight)
             elif action == "limit" and event.get("limit") in LIMIT_COUNTERS \
@@ -267,8 +269,10 @@ def print_report(paths, files, data, cfg, why, project):
     if data["stats"].get("bad"):
         print(f"unreadable log lines: {data['stats']['bad']}")
     if data["stats"].get("truncated"):
-        print(f"logs truncated at their size limit: {data['stats']['truncated']} "
-              "(later events are missing)")
+        print(f"log cut at its size limit: {data['stats']['truncated']} session(s); "
+              "the start and the end were kept")
+    if data["stats"].get("dropped"):
+        print(f"events dropped from the middle: {data['stats']['dropped']}")
     if cfg is None:
         print(clean(f"profile checks skipped: {why}"))
     else:

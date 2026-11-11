@@ -8,6 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import proxy  # noqa: E402
+import report  # noqa: E402
 from tests.helpers import scratch_dir  # noqa: E402
 
 
@@ -236,6 +237,33 @@ class LoggerTest(unittest.TestCase):
                          [("a", None), ("b", None), ("c", None), ("d", None), ("d", None),
                           ("e", None), ("e", None), ("a", 1), ("b", 1), ("c", 1)])
         self.assertEqual(len(log.counts), 3)
+
+    def test_flush_after_truncation_goes_to_tail(self):
+        log = self.make(limit=300, tail_limit=10000)
+        self.deny(log)
+        self.deny(log)
+        for n in range(5):
+            self.deny(log, f"h{n}.test")
+        head = self.lines()
+        self.assertEqual(head[-1]["action"], "log_truncated")
+        log.flush()
+        self.assertEqual(self.lines(), head)  # the head is never written past its limit
+        self.assertEqual(self.lines(".tail")[-1]["repeated"], 1)
+
+    def test_rotation_counts_dropped_lines(self):
+        log = self.make(limit=200, tail_limit=1000)
+        total = 60
+        for n in range(total):
+            self.deny(log, f"h{n:02}.test")
+        log.flush()
+        events = [*self.lines(), *self.lines(".tail.old"), *self.lines(".tail")]
+        kept = [e for e in events if e["action"] == "deny"]
+        dropped = sum(e["count"] for e in events if e["action"] == "log_dropped")
+        self.assertGreater(dropped, 0)
+        self.assertEqual(len(kept) + dropped, total)
+        self.assertEqual(kept[-1]["host"], f"h{total - 1}.test")  # the end is kept
+        for suffix in (".tail", ".tail.old"):
+            self.assertLessEqual(os.path.getsize(self.path + suffix), 1000)
 
     def test_no_path_writes_nothing(self):
         log = proxy.Logger(None)
@@ -481,6 +509,26 @@ class ProxyEndToEnd(unittest.TestCase):
         self.assertLessEqual(os.path.getsize(self.log_path), 2000 + 100)  # + the last line
         self.assertEqual(events[-1]["action"], "log_truncated")
         self.assertEqual([e["action"] for e in events].count("log_truncated"), 1)
+
+    def test_flood_keeps_the_end(self):
+        """Thousands of refusals can't push what the agent did last out of the log."""
+        self.start([f"echo.test:{self.upstream.port}"])
+        self.server.log.limit, self.server.log.tail_limit = 2000, 1000
+        for n in range(200):
+            self.request(self.connect_line(f"h{n}.test"))
+        head, _ = self.request(self.connect_line("echo.test"), then=b"ping")
+        self.assertIn(b" 200 ", head)
+        self.upstream.done.wait(5)
+        self.server.log(action="exit", code=0)
+        self.server.log.flush()
+        events = list(report.read_session(self.log_path))
+        with open(self.log_path) as f:
+            self.assertEqual(json.loads(f.readlines()[-1])["action"], "log_truncated")
+        actions = [e["action"] for e in events]
+        self.assertIn("allow", actions[-5:])
+        self.assertIn("exit", actions[-5:])
+        size = sum(os.path.getsize(p) for p in report.session_files(self.log_path))
+        self.assertLessEqual(size, 2000 + 2 * 1000 + 200)
 
     def test_rejects_other_forms(self):
         self.start(["echo.test"])
