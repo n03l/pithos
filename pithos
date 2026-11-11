@@ -50,7 +50,8 @@ from resources import (  # noqa: E402
 from filetrace import (  # noqa: E402
     BlockedFiles, SandboxView, TRACE_FIFO, TraceWatcher, ptrace_allowed, strace_argv,
 )
-from report import cmd_report, offerable_host, parse_events, rule_snapshot  # noqa: E402
+from report import (cmd_report, event_weight, offerable_host, read_session,  # noqa: E402
+                    rule_snapshot)
 
 COMMANDS = ("run", "trust", "log", "allow", "report")
 # The sandbox picks the names in the denied list: don't let it flood the prompt.
@@ -247,16 +248,13 @@ def pending_hosts(paths, sessions, project):
     counts = {}
     for session in sessions:
         try:
-            f = open(os.path.join(paths.logs, session + ".jsonl"), encoding="ascii",
-                     errors="replace")
-        except OSError:
-            continue
-        with f:
-            for event in parse_events(f):
+            for event in read_session(os.path.join(paths.logs, session + ".jsonl")):
                 offer = offerable_host(event)
                 if offer and not known.allows("name", *offer):
                     key = proxy.live_entry(*offer)
-                    counts[key] = counts.get(key, 0) + 1
+                    counts[key] = counts.get(key, 0) + event_weight(event)
+        except OSError:
+            continue
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
 
@@ -1125,14 +1123,13 @@ def cmd_log(args, paths):
         files = files[-1:]
     denied = {}
     for path in files:
-        with open(path, encoding="ascii", errors="replace") as f:
-            for event in parse_events(f):
-                if args.denied:
-                    if event.get("action") == "deny":
-                        key = (str(event.get("host")), str(event.get("port")))
-                        denied.setdefault(key, [0, str(event.get("reason"))])[0] += 1
-                else:
-                    print(clean(" ".join(f"{k}={v}" for k, v in event.items())))
+        for event in read_session(path):
+            if args.denied:
+                if event.get("action") == "deny":
+                    key = (str(event.get("host")), str(event.get("port")))
+                    denied.setdefault(key, [0, str(event.get("reason"))])[0] += event_weight(event)
+            else:
+                print(clean(" ".join(f"{k}={v}" for k, v in event.items())))
     if args.denied:
         if not denied:
             print("nothing denied")

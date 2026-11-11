@@ -940,6 +940,23 @@ class AllowCommand(Fixture):
             self.assertEqual(sb.cmd_log(args, paths or self.paths), 0)
         return out.getvalue()
 
+    def test_pending_hosts_weighs_and_reads_tails(self):
+        self.session()
+        self.write_log([self.denial("a.example.com")])
+        tail = os.path.join(self.paths.logs, "s1.jsonl.tail")
+        with open(tail, "w") as f:
+            f.write(json.dumps({**self.denial("a.example.com"), "repeated": 4}) + "\n")
+        order = sb.pending_hosts(self.paths, sb.running_sessions(self.paths), self.project)
+        self.assertEqual(order, [("a.example.com:443", 5)])
+
+    def test_log_denied_weighs_repeats(self):
+        self.write_log([self.denial("a.example.com"), {**self.denial("a.example.com"), "repeated": 4}])
+        with open(os.path.join(self.paths.logs, "s1.jsonl.tail"), "w") as f:
+            f.write(json.dumps(self.denial("b.example.com")) + "\n")
+        out = self.run_log("--denied")
+        self.assertIn('"a.example.com:443",   # 5x', out)
+        self.assertIn('"b.example.com:443",   # 1x', out)
+
     def test_log_denied_without_denials_says_only_that(self):
         self.write_log([{"action": "allow", "host": "github.com", "port": 443}])
         self.assertEqual(self.run_log("--denied"), "nothing denied\n")
@@ -951,6 +968,73 @@ class AllowCommand(Fixture):
         with open(os.path.join(paths.logs, "s1.jsonl"), "w") as f:
             f.write(json.dumps({"action": "start", "profile": "base"}) + "\n")
         self.assertIn("profile=base", self.run_log(paths=paths))
+
+
+class CountedLog(Fixture):
+    """Logs with counted repeats ("repeated": N) and tail files, as Logger writes them."""
+    SID = "20260101-120000-abc123"
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(self.paths.logs)
+        self.head = os.path.join(self.paths.logs, self.SID + ".jsonl")
+
+    def write(self, path, events):
+        with open(path, "w") as f:
+            for event in events:
+                f.write(json.dumps(event) + "\n")
+
+    def denial(self, host="a.test", **extra):
+        return {"action": "deny", "host": host, "port": 443, "reason": sb.proxy.NOT_LISTED, **extra}
+
+    def test_repeated_lines_are_weighed(self):
+        self.write(self.head, [self.denial(), self.denial(repeated=4)])
+        data = report.collect_logs([self.head])
+        self.assertEqual(data["refused"], {"a.test:443": 5})
+        self.assertEqual(data["offers"], {("a.test", 443): 5})
+
+    def test_tail_files_are_read_in_order(self):
+        self.write(self.head, [{"action": "start", "profile": "base"}])
+        self.write(self.head + ".tail.old", [{"action": "allow", "host": "b.test", "port": 443}])
+        self.write(self.head + ".tail", [{"action": "exit", "code": 3}])
+        self.assertEqual([e["action"] for e in report.read_session(self.head)],
+                         ["start", "allow", "exit"])
+        data = report.collect_logs([self.head])
+        self.assertEqual(len(data["starts"]), 1)
+        self.assertEqual(data["allowed"], {("b.test", 443): 1})
+        self.assertEqual(data["exits"][-1]["code"], 3)
+
+    def test_hostile_repeat_counts_weigh_one(self):
+        hostile = ("9", True, -5, 0, 1.5, None, [3], {"n": 3})
+        self.write(self.head, [self.denial(repeated=value) for value in hostile])
+        self.assertEqual(report.collect_logs([self.head])["refused"], {"a.test:443": len(hostile)})
+        for value in hostile:
+            self.assertEqual(report.event_weight({"repeated": value}), 1)
+        self.assertEqual(report.event_weight({"repeated": 7}), 7)
+
+    def test_old_log_reads_as_before(self):
+        self.write(self.head, [self.denial(), self.denial(), self.denial("c.test"),
+                               {"action": "allow", "host": "b.test", "port": 443},
+                               {"action": "limit", "limit": "memory", "count": 2}])
+        data = report.collect_logs([self.head])
+        self.assertEqual(data["refused"], {"a.test:443": 2, "c.test:443": 1})
+        self.assertEqual(data["allowed"], {("b.test", 443): 1})
+        self.assertEqual(data["limits_hit"], {"memory": 2})
+
+    def test_repeated_limit_events_multiply(self):
+        self.write(self.head, [{"action": "limit", "limit": "memory", "count": 2, "repeated": 3}])
+        self.assertEqual(report.collect_logs([self.head])["limits_hit"], {"memory": 6})
+
+    def test_tail_files_are_not_sessions(self):
+        for path in (self.head, self.head + ".tail", self.head + ".tail.old"):
+            self.write(path, [self.denial()])
+        _, args = sb.parse_args(["report", "--all"])
+        self.assertEqual(report.select_sessions(args, self.paths), [self.head])
+
+    def test_session_files_skips_missing_and_non_files(self):
+        self.write(self.head, [])
+        os.mkdir(self.head + ".tail")
+        self.assertEqual(report.session_files(self.head), [self.head])
 
 
 class Report(Fixture):

@@ -35,6 +35,29 @@ def parse_events(lines, stats=None):
             stats["bad"] = stats.get("bad", 0) + 1
 
 
+TAIL_SUFFIXES = (".tail.old", ".tail")  # oldest first; never "*.jsonl", so not a session
+
+
+def session_files(head):
+    """A session's log files in the order they were written: the head, then its tails."""
+    return [path for path in (head, *(head + suffix for suffix in TAIL_SUFFIXES))
+            if os.path.isfile(path)]
+
+
+def read_session(head, stats=None):
+    """The events of one session, head and tails, like parse_events."""
+    for path in session_files(head):
+        with open(path, encoding="ascii", errors="replace") as f:
+            yield from parse_events(f, stats)
+
+
+def event_weight(event):
+    """How many events a line stands for: Logger writes repeats as one line with "repeated": N.
+    The sandbox shapes what gets logged, so anything but a positive int counts once."""
+    n = event.get("repeated")
+    return n if type(n) is int and n >= 1 else 1
+
+
 def offerable_host(event):
     """(host, port) if this log event may be offered for approval, else None. The sandbox picks
     these names, so only well-formed host names refused for not being listed qualify."""
@@ -74,41 +97,39 @@ def collect_logs(files):
             "refused": {}, "offers": {}, "allowed": {}, "quarantined": {}, "files": {},
             "limits_hit": {}}
 
-    def bump(table, key):
-        table[key] = table.get(key, 0) + 1
+    def bump(table, key, n=1):
+        table[key] = table.get(key, 0) + n
 
     for path in files:
-        with open(path, encoding="ascii", errors="replace") as f:
-            for event in parse_events(f, data["stats"]):
-                action = event.get("action")
-                data["last_ts"] = event.get("ts", data["last_ts"])
-                host, port = event.get("host"), event.get("port")
-                if action == "start":
-                    data["starts"].append(event)
-                elif action == "exit":
-                    data["exits"].append(event)
-                elif action == "log_truncated":
-                    bump(data["stats"], "truncated")
-                elif action == "quarantine":
-                    bump(data["quarantined"], str(event.get("path")))
-                elif action == "limit" and event.get("limit") in LIMIT_COUNTERS \
-                        and type(event.get("count")) is int and event["count"] > 0:
-                    hit = data["limits_hit"]
-                    hit[event["limit"]] = hit.get(event["limit"], 0) + event["count"]
-                elif action == "file" and isinstance(event.get("path"), str) \
-                        and event.get("reason") in (NOT_MOUNTED, HIDDEN, READ_ONLY):
-                    bump(data["files"], (event["path"], event["reason"]))
-                elif action == "allow" and isinstance(host, str) and type(port) is int:
-                    bump(data["allowed"], (host, port))
-                elif action == "deny":
-                    reason = str(event.get("reason"))
-                    if reason == proxy.NOT_LISTED:
-                        bump(data["refused"], f"{host}:{port}")
-                        offer = offerable_host(event)
-                        if offer:
-                            bump(data["offers"], offer)
-                    elif not reason.startswith("resolve failed"):
-                        bump(data["violations"], f"{host}:{port}  {reason}")
+        for event in read_session(path, data["stats"]):
+            action, weight = event.get("action"), event_weight(event)
+            data["last_ts"] = event.get("ts", data["last_ts"])
+            host, port = event.get("host"), event.get("port")
+            if action == "start":
+                data["starts"].append(event)
+            elif action == "exit":
+                data["exits"].append(event)
+            elif action == "log_truncated":
+                bump(data["stats"], "truncated")
+            elif action == "quarantine":
+                bump(data["quarantined"], str(event.get("path")), weight)
+            elif action == "limit" and event.get("limit") in LIMIT_COUNTERS \
+                    and type(event.get("count")) is int and event["count"] > 0:
+                bump(data["limits_hit"], event["limit"], event["count"] * weight)
+            elif action == "file" and isinstance(event.get("path"), str) \
+                    and event.get("reason") in (NOT_MOUNTED, HIDDEN, READ_ONLY):
+                bump(data["files"], (event["path"], event["reason"]), weight)
+            elif action == "allow" and isinstance(host, str) and type(port) is int:
+                bump(data["allowed"], (host, port), weight)
+            elif action == "deny":
+                reason = str(event.get("reason"))
+                if reason == proxy.NOT_LISTED:
+                    bump(data["refused"], f"{host}:{port}", weight)
+                    offer = offerable_host(event)
+                    if offer:
+                        bump(data["offers"], offer, weight)
+                elif not reason.startswith("resolve failed"):
+                    bump(data["violations"], f"{host}:{port}  {reason}", weight)
     return data
 
 
