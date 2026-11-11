@@ -12,12 +12,12 @@ import re
 
 import proxy
 from config import (
-    ALWAYS_RO_IN_PROJECT, ConfigError, LIMIT_KEYS, SYSTEM_FORBIDDEN, clean,
+    ConfigError, LIMIT_KEYS, SYSTEM_FORBIDDEN, clean,
     deny_patterns, expand_path, is_sensitive, is_within, load_profile, load_project, merge,
     validate,
 )
 from resources import LIMIT_COUNTERS, describe_limits
-from filetrace import HIDDEN, NOT_MOUNTED, READ_ONLY, sum_traces
+from filetrace import HIDDEN, NOT_MOUNTED, READ_ONLY
 
 
 # -- session logs ----------------------------------------------------------------------
@@ -146,14 +146,6 @@ def report_config(paths, data):
         return None, project, str(e).split("\n")[0]
 
 
-def is_protected(path, project, rels):
-    norm = os.path.normpath(path)
-    if "/.git/hooks/" in f"/{norm}/":
-        return True
-    return any(is_within(norm, rel) or (project and is_within(norm, os.path.join(project, rel)))
-               for rel in rels)
-
-
 def print_section(title, rows, empty="none"):
     print(f"\n{title}")
     rows = list(rows)
@@ -173,7 +165,7 @@ def count_rows(table):
     return [f"{count:6}x {key}" for key, count in by_count(table)]
 
 
-def print_security(data, trace, project, patterns, rels):
+def print_security(data):
     print("\nSECURITY REVIEW")
     used = {proxy.live_entry(*key): count for key, count in data["allowed"].items()}
     print_section("Hosts contacted (allowed connections):", count_rows(used))
@@ -182,22 +174,6 @@ def print_security(data, trace, project, patterns, rels):
     print_section("Quarantined paths:", count_rows(data["quarantined"]))
     print_section("Hidden paths the agent tried (credentials, fs.deny):",
                   [path for path, reason in sorted(data["files"]) if reason == HIDDEN])
-    if trace is None:
-        print("\nFile sections skipped: no file trace, re-run with --trace")
-        return
-    sensitive, protected, refused = {}, {}, {}
-    for group, table in trace.items():
-        for path, count in table.items():
-            if is_sensitive(path, patterns):
-                key = f"{group:8}{path}"
-                sensitive[key] = sensitive.get(key, 0) + count
-            if group in ("written", "refused") and is_protected(path, project, rels):
-                protected[f"{group:8}{path}"] = count
-            elif group == "refused" and not is_sensitive(path, patterns):
-                refused[path] = count
-    print_section("Sensitive paths touched (missing = probed):", count_rows(sensitive))
-    print_section("Protected project files, write attempts:", count_rows(protected))
-    print_section("Other refused file accesses:", count_rows(refused))
 
 
 def worth_mounting(path, project, paths, patterns):
@@ -212,7 +188,7 @@ def worth_mounting(path, project, paths, patterns):
     return not any(is_within(norm, p) for p in never) and os.path.lexists(norm)
 
 
-def unused_rules(cfg, project, paths, data, trace):
+def unused_rules(cfg, data):
     rows = []
     allowed = []
     for (host, port) in data["allowed"]:
@@ -224,23 +200,10 @@ def unused_rules(cfg, project, paths, data, trace):
         rule = proxy.Allowlist([entry])
         if not any(rule.allows(*item) for item in allowed):
             rows.append(f"net.allow  {entry}")
-    if trace is not None:
-        seen = set()
-        for group in ("read", "written"):
-            for path in trace[group]:
-                norm = os.path.normpath(path)
-                while norm not in seen and norm not in ("/", "."):
-                    seen.add(norm)
-                    norm = os.path.dirname(norm)
-        fs = cfg.get("fs", {})
-        for key in ("ro", "rw", "rw_mkdir"):
-            for entry in fs.get(key, []):
-                if expand_path(entry, project, paths) not in seen:
-                    rows.append(f"fs.{key:9}{entry}")
     return rows
 
 
-def print_tuning(data, trace, cfg, why, project, paths, patterns):
+def print_tuning(data, cfg, why, project, paths, patterns):
     print("\nPROFILE TUNING")
     print("\nHosts to consider allowing (add to [net] allow only if expected):")
     if not data["offers"]:
@@ -249,11 +212,6 @@ def print_tuning(data, trace, cfg, why, project, paths, patterns):
         print(clean(f'  "{proxy.live_entry(host, port)}",   # {count}x'))
     if len(data["offers"]) > REPORT_LIMIT:
         print(f"  ... and {len(data['offers']) - REPORT_LIMIT} more")
-    if trace is not None:
-        wanted = {p: c for p, c in trace["missing"].items()
-                  if worth_mounting(p, project, paths, patterns)}
-        print_section("Looked for, absent in the sandbox, present on the host (review first):",
-                      count_rows(wanted))
     refused = [f"{reason:12} {path}" for path, reason in sorted(data["files"])
                if reason != HIDDEN and worth_mounting(path, project, paths, patterns)]
     print_section("Refused file accesses the agent was told about, present on the host:", refused)
@@ -261,10 +219,10 @@ def print_tuning(data, trace, cfg, why, project, paths, patterns):
         print(clean(f"\nAllowed but unused: skipped: {why}"))
     else:
         print_section("Allowed but unused in these sessions (evidence from these sessions only):",
-                      unused_rules(cfg, project, paths, data, trace))
+                      unused_rules(cfg, data))
 
 
-def print_report(paths, files, data, trace, cfg, why, project):
+def print_report(paths, files, data, cfg, why, project):
     names = [os.path.basename(f)[:-len(".jsonl")] for f in files]
     print(clean(f"pithos report: {names[-1] if len(names) == 1 else f'{len(names)} sessions'}"))
     for event in data["starts"][-1:]:
@@ -283,7 +241,6 @@ def print_report(paths, files, data, trace, cfg, why, project):
         print(f"processes killed by the kernel at the memory limit: {data['limits_hit']['memory']}")
     if data["limits_hit"].get("processes"):
         print(f"process starts refused at the process limit: {data['limits_hit']['processes']}")
-    print("file trace: " + ("yes" if trace is not None else "no file trace: re-run with --trace"))
     if data["stats"].get("bad"):
         print(f"unreadable log lines: {data['stats']['bad']}")
     if cfg is None:
@@ -293,9 +250,8 @@ def print_report(paths, files, data, trace, cfg, why, project):
               if data.get("rules_logged") else
               "profile checks use the profile as it is now, not as it was during the session")
     patterns = deny_patterns(cfg, project, paths) if cfg else []
-    rels = ALWAYS_RO_IN_PROJECT + (cfg.get("fs", {}).get("ro_in_project", []) if cfg else [])
-    print_security(data, trace, project, patterns, rels)
-    print_tuning(data, trace, cfg, why, project, paths, patterns)
+    print_security(data)
+    print_tuning(data, cfg, why, project, paths, patterns)
 
 
 def cmd_report(args, paths):
@@ -304,9 +260,6 @@ def cmd_report(args, paths):
         print("no sessions logged yet")
         return 0
     data = collect_logs(files)
-    traces = [f[:-len(".jsonl")] + ".trace" for f in files]
-    traces = [t for t in traces if os.path.exists(t)]
-    trace = sum_traces(traces) if traces else None
     cfg, project, why = report_config(paths, data)
-    print_report(paths, files, data, trace, cfg, why, project)
+    print_report(paths, files, data, cfg, why, project)
     return 0

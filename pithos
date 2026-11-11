@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """pithos: run an AI coding agent, and everything it spawns, in a bubblewrap sandbox.
 
-  pithos [run] [-p PROFILE] [-C PROJECT] [--dry-run] [--trace] [--no-file-notice] [--no-limits] [--publish [IP:]PORT] [-v] [--] [CMD ...]
+  pithos [run] [-p PROFILE] [-C PROJECT] [--dry-run] [--no-file-notice] [--no-limits] [--publish [IP:]PORT] [-v] [--] [CMD ...]
   pithos trust [-C PROJECT] [--yes]
-  pithos log [--denied] [--files] [--all]
+  pithos log [--denied] [--all]
   pithos allow [-C PROJECT] [--save | --remove | --list] [HOST[:PORT] ...]
   pithos report [--session ID | --all]
 
@@ -48,8 +48,7 @@ from resources import (  # noqa: E402
     limit_hit_text, limits_notice, read_machine, resolve_limits, scope_argv, scope_cgroup,
 )
 from filetrace import (  # noqa: E402
-    BlockedFiles, SandboxView, TRACE_FIFO, TRACE_GROUPS, TraceWatcher, create_trace_log,
-    ptrace_allowed, strace_argv, sum_traces,
+    BlockedFiles, SandboxView, TRACE_FIFO, TraceWatcher, ptrace_allowed, strace_argv,
 )
 from report import cmd_report, offerable_host, parse_events, rule_snapshot  # noqa: E402
 
@@ -769,8 +768,8 @@ def pick_profile(profile, cmd, paths):
 
 
 class Tools:
-    """The host programs a run uses. strace is set when it traces the sandbox, for --trace or
-    the file notice; systemd_run when the sandbox gets a scope."""
+    """The host programs a run uses. strace is set when the file notice traces the sandbox;
+    systemd_run when the sandbox gets a scope."""
 
     def __init__(self, bwrap, strace=None, file_notice=False, systemd_run=None):
         self.bwrap, self.strace, self.systemd_run = bwrap, strace, systemd_run
@@ -786,16 +785,12 @@ def find_tools(args, cfg):
         raise ConfigError(f"{SANDBOX_PYTHON} is needed inside the sandbox")
 
     file_notice = not args.no_file_notice and cfg.get("agent", {}).get("file_notice", True)
-    strace = shutil.which("strace") if args.trace or file_notice else None
-    if args.trace and not strace:
-        raise ConfigError("--trace needs strace: sudo apt install strace")
+    strace = shutil.which("strace") if file_notice else None
     if file_notice and not strace:
         note("strace not found: the agent won't be told which file accesses the sandbox refused "
              "(sudo apt install strace, or --no-file-notice)")
         file_notice = False
     if strace and not ptrace_allowed():
-        if args.trace:
-            raise ConfigError("--trace needs ptrace: kernel.yama.ptrace_scope is 2 or more")
         note("ptrace is restricted (kernel.yama.ptrace_scope): no file notice for the agent")
         strace, file_notice = None, False
 
@@ -813,12 +808,11 @@ def find_tools(args, cfg):
     return Tools(bwrap, strace, file_notice, systemd_run)
 
 
-def sandbox_argv(tools, plan, cmd, trace, unit, env_fd=None, publish_fd=None, bind_fds=None):
+def sandbox_argv(tools, plan, cmd, unit, env_fd=None, publish_fd=None, bind_fds=None):
     """The whole command line: systemd scope, then strace, then bwrap."""
     argv = bwrap_argv(tools.bwrap, plan, plan.project, cmd, env_fd, publish_fd, bind_fds)
     if tools.strace:
-        argv = strace_argv(tools.strace, os.path.join(plan.runtime, TRACE_FIFO), argv,
-                           failed_only=not trace)
+        argv = strace_argv(tools.strace, os.path.join(plan.runtime, TRACE_FIFO), argv)
     if tools.systemd_run:
         argv = scope_argv(tools.systemd_run, unit, plan.limits) + argv
     return argv
@@ -877,8 +871,7 @@ def cmd_run(args, paths):
             for line in plan.skipped:
                 note(f"skipped {line}")
         if args.dry_run:
-            argv = sandbox_argv(tools, plan, agent_command(cfg, cmd), args.trace,
-                                "pithos-<session>.scope")
+            argv = sandbox_argv(tools, plan, agent_command(cfg, cmd), "pithos-<session>.scope")
             print(shlex.join(argv))
             return 0
         return run_session(args, paths, tools, cfg, plan, profile, cmd, allowlist)
@@ -886,22 +879,18 @@ def cmd_run(args, paths):
         shutil.rmtree(runtime, ignore_errors=True)
 
 
-def start_trace_watcher(args, paths, tools, plan, session, log):
-    """(trace log path or None, TraceWatcher or None)."""
+def start_file_notice(paths, tools, plan, log):
+    """The TraceWatcher for the file notice, or None."""
     if not tools.strace:
-        return None, None
-    trace_path = None
-    if args.trace:
-        trace_path = os.path.join(paths.logs, session + ".trace")
-        create_trace_log(trace_path)
+        return None
     fifo = os.path.join(plan.runtime, TRACE_FIFO)
     os.mkfifo(fifo, 0o600)
     denied = BlockedFiles(os.path.join(plan.runtime, "blocked-files") if tools.file_notice
                           else None, paths.home)
     watcher = TraceWatcher(fifo, SandboxView(plan, paths.home), denied,
-                           log if tools.file_notice else None, trace_path)
+                           log if tools.file_notice else None)
     watcher.start()
-    return trace_path, watcher
+    return watcher
 
 
 def start_scope_monitor(pid, unit, events):
@@ -943,7 +932,7 @@ def run_session(args, paths, tools, cfg, plan, profile, cmd, allowlist):
         agent_pid = start_ssh_agent(cfg, project, paths, runtime, plan)
         if agent_pid:
             cleanup.callback(stop_process, agent_pid)
-        trace_path, watcher = start_trace_watcher(args, paths, tools, plan, session, log)
+        watcher = start_file_notice(paths, tools, plan, log)
         if watcher:
             cleanup.callback(watcher.finish, timeout=1)
         publish_fd = None
@@ -975,7 +964,7 @@ def run_session(args, paths, tools, cfg, plan, profile, cmd, allowlist):
             passed.append(env_r := env_pipe(plan))
             bind_fds = open_binds(plan)  # last: the shorter the wait before bwrap, the better
             passed += bind_fds.values()
-            argv = sandbox_argv(tools, plan, agent_command(cfg, cmd), args.trace, unit, env_r,
+            argv = sandbox_argv(tools, plan, agent_command(cfg, cmd), unit, env_r,
                                 publish_fd, bind_fds)
             child = subprocess.Popen(argv, pass_fds=passed)
         finally:
@@ -993,8 +982,6 @@ def run_session(args, paths, tools, cfg, plan, profile, cmd, allowlist):
         if watcher:
             watcher.finish()
         log(action="exit", code=code)
-        if trace_path:
-            note(f"trace: {clean(trace_path)} (pithos report, or pithos log --files)")
         for path in quarantine(plan, session):
             log(action="quarantine", path=path)
             note(f"WARNING: the sandbox created a protected path; moved to {clean(path)}")
@@ -1116,21 +1103,7 @@ def cmd_allow(args, paths):
     return 0
 
 
-def print_trace_summary(args, paths):
-    files = sorted(glob.glob(os.path.join(glob.escape(paths.logs), "*.trace")))
-    if not files:
-        raise ConfigError("no trace found: run with --trace first, e.g. pithos --trace claude")
-    totals = sum_traces(files if args.all else files[-1:])
-    for name in TRACE_GROUPS:
-        print(f"{name}:")
-        for item, count in sorted(totals[name].items(), key=lambda kv: (-kv[1], kv[0])):
-            print(clean(f"{count:7} {item}"))
-    return 0
-
-
 def cmd_log(args, paths):
-    if args.files:
-        return print_trace_summary(args, paths)
     files = sorted(glob.glob(os.path.join(glob.escape(paths.logs), "*.jsonl")))
     if not files:
         print("no sessions logged yet")
@@ -1170,8 +1143,6 @@ def parse_args(argv):
     if command == "run":
         parser.add_argument("-p", "--profile", help="profile name (default: guessed from CMD)")
         parser.add_argument("--dry-run", action="store_true", help="print the bwrap command")
-        parser.add_argument("--trace", action="store_true",
-                            help="record file accesses with strace; read with: pithos log --files")
         parser.add_argument("--no-limits", action="store_true",
                             help="run even without a systemd scope: no limit on total memory "
                                  "or CPU")
@@ -1198,8 +1169,6 @@ def parse_args(argv):
         which.add_argument("--all", action="store_true", help="combine all sessions")
     else:
         parser.add_argument("--denied", action="store_true", help="summarise denied hosts")
-        parser.add_argument("--files", action="store_true",
-                            help="summarise files accessed in the last --trace session")
         parser.add_argument("--all", action="store_true", help="all sessions, not only the last")
     args = parser.parse_args(argv)
     return command, args

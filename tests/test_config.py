@@ -946,14 +946,11 @@ class Report(Fixture):
         return {"ts": "2026-01-01T12:00:00+0000", "action": "start", "profile": "base",
                 "project": self.project, "cmd": ["x"], **extra}
 
-    def write(self, events, calls=None, sid=None):
+    def write(self, events, sid=None):
         base = os.path.join(self.paths.logs, sid or self.SID)
         with open(base + ".jsonl", "w") as f:
             for event in events:
                 f.write((event if isinstance(event, str) else json.dumps(event)) + "\n")
-        if calls is not None:
-            with open(base + ".trace", "w") as f:
-                f.writelines(trace_lines(*calls))
 
     def report(self, *argv):
         _, args = sb.parse_args(["report", *argv])
@@ -968,9 +965,6 @@ class Report(Fixture):
 
     def denial(self, host, reason=sb.proxy.NOT_LISTED, port=443):
         return {"action": "deny", "host": host, "port": port, "reason": reason}
-
-    def missing(self, path):
-        return f'openat(AT_FDCWD, "{path}", O_RDONLY) = -1 ENOENT (No such file or directory)'
 
     def test_no_sessions(self):
         self.assertEqual(self.report(), "no sessions logged yet\n")
@@ -1020,7 +1014,7 @@ class Report(Fixture):
     def test_splits_violations_from_tuning(self):
         self.write([self.start(), self.denial("example.com"),
                     self.denial("evil.test", reason="TLS SNI 'x' does not match"),
-                    {"action": "allow", "host": "github.com", "port": 443}], [])
+                    {"action": "allow", "host": "github.com", "port": 443}])
         out = self.report()
         self.assertIn("evil.test", self.section(out, "policy violations"))
         self.assertNotIn("example.com", self.section(out, "policy violations"))
@@ -1032,46 +1026,20 @@ class Report(Fixture):
     def test_lists_hosts_contacted_with_counts(self):
         allow = {"action": "allow", "host": "api.example.com", "port": 443}
         self.write([self.start(), allow, allow,
-                    {"action": "allow", "host": self.EVIL, "port": 443}], [])
+                    {"action": "allow", "host": self.EVIL, "port": 443}])
         out = self.report()
         self.assertIn("2x api.example.com:443", self.section(out, "Hosts contacted"))
         self.assertNotIn("\x1b", out)
 
-    def test_flags_probe_of_secret_even_through_dotdot(self):
-        self.write([self.start()], [self.missing(f"{self.project}/../../.ssh/id_rsa")])
-        self.assertIn("id_rsa", self.section(self.report(), "Sensitive paths"))
-
-    def test_profile_deny_glob_is_sensitive(self):
-        self.write([self.start()], [self.missing(f"{self.project}/a/b/secret.txt")])
-        self.assertIn("secret.txt", self.section(self.report(), "Sensitive paths"))
-
-    def test_protected_write_attempt(self):
-        hook = f"{self.project}/.git/hooks/pre-commit"
-        self.write([self.start()],
-                   [f'openat(AT_FDCWD, "{hook}", O_WRONLY|O_CREAT, 0644) = -1 EROFS (Read-only file system)'])
-        self.assertIn("pre-commit", self.section(self.report(), "Protected project"))
-
-    def test_missing_host_path_offered_but_never_a_secret(self):
-        wanted = os.path.join(self.home, "tool.conf")
-        open(wanted, "w").close()
-        self.write([self.start()], [self.missing(wanted), self.missing(self.home + "/.ssh/id_ed25519"),
-                                    self.missing(self.home), self.missing("/proc/1/environ")])
-        block = self.section(self.report(), "Looked for")
-        self.assertIn("tool.conf", block)
-        for bad in (".ssh", "environ"):
-            self.assertNotIn(bad, block)
-        self.assertNotIn(self.home + "\n", block + "\n")
-
     def test_unused_rules(self):
-        self.write([self.start()], [f'openat(AT_FDCWD, "/usr/bin/x", O_RDONLY) = 3</usr/bin/x>'])
+        self.write([self.start()])
         block = self.section(self.report(), "Allowed but unused")
         self.assertIn("github.com", block)
-        self.assertNotIn("/usr", block)
 
     def test_hostile_values_are_neutralised(self):
         self.write([self.start(cmd=[self.EVIL]), self.denial(self.EVIL), self.denial(self.EVIL, reason=self.EVIL),
                     {"action": "quarantine", "path": self.EVIL}, "not json", "[1]", 
-                    self.denial(["x"]), self.denial("a.test", port="443")], [])
+                    self.denial(["x"]), self.denial("a.test", port="443")])
         out = self.report()
         self.assertNotIn("\x1b", out)
         self.assertNotIn("\x07", out)
@@ -1087,14 +1055,10 @@ class Report(Fixture):
                 report.cmd_report(args, self.paths)
         self.assertIn(self.SID, self.report("--session", self.SID))
 
-    def test_without_trace(self):
-        self.write([self.start()])
-        self.assertIn("re-run with --trace", self.report())
-
     def test_untrusted_project_config_is_not_applied(self):
         with open(os.path.join(self.project, ".pithos.toml"), "w") as f:
             f.write('[net]\nallow = ["planted.test"]\n')
-        self.write([self.start()], [])
+        self.write([self.start()])
         out = self.report()
         self.assertIn("skipped", out)
         self.assertNotIn("planted.test", out)
@@ -1103,18 +1067,17 @@ class Report(Fixture):
                     "ro_in_project": []}, "net": {"allow": ["logged.test"]}}
 
     def test_logged_rules_win_over_the_current_profile(self):
-        self.write([self.start(rules=self.RULES)], [self.missing(self.home + "/.vault/key")])
+        self.write([self.start(rules=self.RULES)])
         out = self.report()
         self.assertIn("rules recorded when the session started", out)
         block = self.section(out, "Allowed but unused")
         self.assertIn("logged.test", block)
         self.assertNotIn("github.com", block)
-        self.assertIn(".vault/key", self.section(out, "Sensitive paths"))
 
     def test_logged_rules_do_not_read_the_project_config(self):
         with open(os.path.join(self.project, ".pithos.toml"), "w") as f:
             f.write('[net]\nallow = ["planted.test"]\n')
-        self.write([self.start(rules=self.RULES)], [])
+        self.write([self.start(rules=self.RULES)])
         out = self.report()
         self.assertNotIn("planted.test", out)
         self.assertIn("logged.test", out)
@@ -1122,7 +1085,7 @@ class Report(Fixture):
     def test_damaged_logged_rules_are_skipped(self):
         for bad in (5, {"net": {"allow": "x"}}, {"nope": {}}, {"net": {"allow": ["bad host:x"]}}):
             with self.subTest(bad=bad):
-                self.write([self.start(rules=bad)], [])
+                self.write([self.start(rules=bad)])
                 self.assertIn("profile checks skipped", self.report())
 
     def test_snapshot_round_trips_through_validation(self):
@@ -1132,18 +1095,20 @@ class Report(Fixture):
         self.assertEqual(snapshot["net"]["allow"], ["github.com"])
 
     def test_same_profile_with_changed_rules_skips_checks(self):
-        self.write([self.start(rules=self.RULES)], [])
-        self.write([self.start()], [], sid="20260101-130000-abc123")
+        self.write([self.start(rules=self.RULES)])
+        self.write([self.start()], sid="20260101-130000-abc123")
         self.assertIn("different profiles", self.report("--all"))
 
     def test_mixed_sessions_skip_profile_checks(self):
-        self.write([self.start()], [])
-        self.write([self.start(profile="other")], [], sid="20260101-130000-abc123")
+        self.write([self.start()])
+        self.write([self.start(profile="other")], sid="20260101-130000-abc123")
         self.assertIn("different profiles", self.report("--all"))
 
     def test_removed_flags_are_refused(self):
-        """report --explain and its run --no-base-net are gone, not silently ignored."""
-        for argv in (["report", "--explain"], ["run", "--no-base-net", "--", "true"]):
+        """report --explain, run --no-base-net and the file trace flags are gone, not
+        silently ignored."""
+        for argv in (["report", "--explain"], ["run", "--no-base-net", "--", "true"],
+                     ["run", "--trace", "--", "true"], ["log", "--files"]):
             with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), \
                     self.assertRaises(SystemExit):
                 sb.parse_args(argv)
@@ -1180,148 +1145,6 @@ class WindowTitle(unittest.TestCase):
         self.assertEqual(out.getvalue(), "\033]2;]2;evilclaude\007")
 
 
-BWRAP_SETUP = 'mount("/home/setup", "/newroot/x", NULL, MS_BIND, NULL) = 0\n'
-BRIDGE_START = 'execve("/usr/bin/python3", ["/usr/bin/python3", "-I"], 0x1 /* 9 vars */) = 0\n'
-
-
-def trace_lines(*calls):
-    return [f"7  {c}\n" for c in (BWRAP_SETUP.strip(), BRIDGE_START.strip(), *calls)]
-
-
-class Trace(Fixture):
-    def test_strace_argv_wraps_bwrap_unchanged(self):
-        inner = ["/usr/bin/bwrap", "--args", "7", "--", "cmd"]
-        for failed_only in (True, False):
-            argv = filetrace.strace_argv("/usr/bin/strace", "/l/s.trace", inner, failed_only)
-            self.assertEqual(argv[-len(inner):], inner)
-            self.assertIn("-D", argv)
-            self.assertIn("--seccomp-bpf", argv)
-            self.assertNotIn("-v", argv)
-            self.assertEqual("-Z" in argv, failed_only)
-
-    def test_summary_starts_at_the_bridge_probe_and_skips_it(self):
-        probe = f'stat("{config.TRACE_START}", 0x1) = -1 ENOENT (No such file or directory)'
-        lines = [f"7  {c}\n" for c in (
-            'openat(AT_FDCWD, "/setup", O_RDONLY) = -1 ENOENT (No such file or directory)',
-            probe, 'openat(AT_FDCWD, "/after", O_RDONLY) = -1 ENOENT (x)')]
-        self.assertEqual(filetrace.summarise_trace(lines)["missing"], {"/after": 1})
-
-    def test_paths_are_unescaped_and_relative_ones_joined_to_the_cwd(self):
-        groups = filetrace.summarise_trace(trace_lines(
-            r'openat(AT_FDCWD</w>, "caf\303\251 \"q\" b\\s", O_RDONLY) = 3</w/x>',
-            r'openat(AT_FDCWD, "/bad\377", O_RDONLY) = 3</x>'))
-        self.assertEqual(set(groups["read"]), {'/w/café "q" b\\s', "/bad\\xff"})
-
-    def test_flag_does_not_swallow_the_command(self):
-        command, args = sb.parse_args(["--trace", "claude"])
-        self.assertEqual((command, args.trace, args.cmd), ("run", True, ["claude"]))
-        self.assertFalse(sb.parse_args(["claude"])[1].trace)
-
-    def test_env_values_stay_off_the_traced_argv(self):
-        plan = self.plan(environ={"TERM": "secret-term-value"})
-        argv = filetrace.strace_argv("strace", "/l/s.trace",
-                              sb.bwrap_argv("bwrap", plan, self.project, ["x"], env_fd=7))
-        self.assertNotIn("secret-term-value", " ".join(argv))
-
-    def test_missing_strace_is_an_error(self):
-        _, args = sb.parse_args(["-C", self.project, "--trace", "claude"])
-        with mock.patch.object(sb.shutil, "which", lambda n: None if n == "strace" else "/b/" + n), \
-                mock.patch.object(sb, "check_bwrap", lambda bwrap: None):
-            with self.assertRaisesRegex(config.ConfigError, "strace"):
-                sb.cmd_run(args, self.paths)
-
-    def test_log_is_private(self):
-        path = os.path.join(self.root, "a.trace")
-        filetrace.create_trace_log(path)
-        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
-
-    def test_log_refuses_existing_file_and_symlink(self):
-        target = os.path.join(self.root, "target")
-        link = os.path.join(self.root, "link.trace")
-        os.symlink(target, link)
-        with self.assertRaises(config.ConfigError):
-            filetrace.create_trace_log(link)
-        self.assertFalse(os.path.exists(target))
-        open(target, "w").close()
-        with self.assertRaises(config.ConfigError):
-            filetrace.create_trace_log(target)
-
-    def test_summary_groups(self):
-        groups = filetrace.summarise_trace(trace_lines(
-            'openat(AT_FDCWD, "/etc/hostname", O_RDONLY|O_CLOEXEC) = 3</etc/hostname>',
-            'openat(AT_FDCWD, "/etc/hostname", O_RDONLY|O_CLOEXEC) = 3</etc/hostname>',
-            'openat(AT_FDCWD, "/w/out", O_WRONLY|O_CREAT|O_TRUNC, 0666) = 3</w/out>',
-            'mkdir("/w/dir", 0777) = 0',
-            'rename("/w/a", "/w/b") = 0',
-            'symlink("/ignored/target", "/w/ln") = 0',
-            'openat(4</w/sub>, "rel", O_RDONLY) = 5</w/sub/rel>',
-            'statx(AT_FDCWD, "/opt/no", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0x1) '
-            '= -1 ENOENT (No such file or directory)',
-            'openat(AT_FDCWD, "/usr/x", O_WRONLY) = -1 EROFS (Read-only file system)',
-        ))
-        self.assertEqual(groups["read"], {"/etc/hostname": 2, "/w/sub/rel": 1})
-        self.assertEqual(set(groups["written"]), {"/w/out", "/w/dir", "/w/a", "/w/b", "/w/ln"})
-        self.assertEqual(groups["missing"], {"/opt/no": 1})
-        self.assertEqual(groups["refused"], {"/usr/x": 1})
-
-    def test_summary_skips_setup_and_needs_the_bridge(self):
-        groups = filetrace.summarise_trace(trace_lines())
-        self.assertFalse(any(groups.values()))
-        lines = ['7  openat(AT_FDCWD, "/before", O_RDONLY) = 3</before>\n']
-        self.assertFalse(any(filetrace.summarise_trace(lines).values()))
-
-    def test_summary_joins_split_lines(self):
-        lines = trace_lines() + [
-            '8  openat(AT_FDCWD, "/a", O_WRONLY <unfinished ...>\n',
-            '9  stat("/b", {st_mode=S_IFREG}) = 0\n',
-            '8  <... openat resumed>) = 3</a>\n',
-        ]
-        groups = filetrace.summarise_trace(lines)
-        self.assertEqual(groups["written"], {"/a": 1})
-        self.assertEqual(groups["read"], {"/b": 1})
-
-    def test_summary_survives_hostile_lines(self):
-        lines = trace_lines(
-            'openat(AT_FDCWD, "/x O_WRONLY", O_RDONLY) = 3</x O_WRONLY>',
-            'openat(AT_FDCWD, "/y) = -1 ENOENT (z)", O_RDONLY) = 3</y>',
-        ) + ["garbage\n", "\n", "7  \n", '7  <... openat resumed>) = 3\n', '7  open("/cut\n',
-             "7  openat(\n", "x" * 100000 + "\n"]
-        groups = filetrace.summarise_trace(lines)
-        self.assertEqual(set(groups["read"]), {"/x O_WRONLY", "/y) = -1 ENOENT (z)"})
-        self.assertEqual(groups["missing"], {})
-
-    def write_trace(self, name, *calls):
-        os.makedirs(self.paths.logs, exist_ok=True)
-        with open(os.path.join(self.paths.logs, name), "w") as f:
-            f.writelines(trace_lines(*calls))
-
-    def log_files(self, *extra):
-        _, args = sb.parse_args(["log", "--files", *extra])
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(sb.cmd_log(args, self.paths), 0)
-        return out.getvalue()
-
-    def test_log_files_strips_terminal_escapes(self):
-        self.write_trace("1.trace", 'stat("/evil\x1b]52;c;x\x07", {}) = 0')
-        output = self.log_files()
-        self.assertIn("/evil", output)
-        self.assertNotIn("\x1b", output)
-
-    def test_log_files_uses_newest_unless_all(self):
-        self.write_trace("1.trace", 'stat("/old", {}) = 0')
-        self.write_trace("2.trace", 'stat("/new", {}) = 0')
-        output = self.log_files()
-        self.assertIn("/new", output)
-        self.assertNotIn("/old", output)
-        self.assertIn("/old", self.log_files("--all"))
-
-    def test_log_files_without_a_trace(self):
-        _, args = sb.parse_args(["log", "--files"])
-        with self.assertRaisesRegex(config.ConfigError, "--trace"):
-            sb.cmd_log(args, self.paths)
-
-
 def failed(call, path, error="ENOENT", flags="O_RDONLY"):
     return f'{call}(AT_FDCWD, "{path}", {flags}) = -1 {error} (x)'
 
@@ -1330,6 +1153,20 @@ class FileNotice(Fixture):
     def setUp(self):
         super().setUp()
         self.view = filetrace.SandboxView(self.plan(), self.home)
+
+    def test_strace_argv_wraps_bwrap_unchanged(self):
+        inner = ["/usr/bin/bwrap", "--args", "7", "--", "cmd"]
+        argv = filetrace.strace_argv("/usr/bin/strace", "/l/s.trace", inner)
+        self.assertEqual(argv[-len(inner):], inner)
+        for flag in ("-D", "--seccomp-bpf", "-Z"):
+            self.assertIn(flag, argv)
+        self.assertNotIn("-v", argv)
+
+    def test_env_values_stay_off_the_traced_argv(self):
+        plan = self.plan(environ={"TERM": "secret-term-value"})
+        argv = filetrace.strace_argv("strace", "/l/s.trace",
+                                     sb.bwrap_argv("bwrap", plan, self.project, ["x"], env_fd=7))
+        self.assertNotIn("secret-term-value", " ".join(argv))
 
     def reason(self, path, error="ENOENT", writes=False):
         return self.view.reason(path, error, writes)
@@ -1447,19 +1284,18 @@ class FileNotice(Fixture):
                             ("/etc/a/b", "/etc"), ("/x", "/x"), (h, "/" + h.split("/")[1])):
             self.assertEqual(filetrace.file_group(path, h), group)
 
-    def watch(self, lines, copy=False):
+    def watch(self, lines):
         fifo = os.path.join(self.runtime, "trace.fifo")
         os.mkfifo(fifo)
         path, denied = self.denied()
         events = []
-        copy_path = os.path.join(self.root, "copy.trace") if copy else None
-        watcher = filetrace.TraceWatcher(fifo, self.view, denied, lambda **e: events.append(e), copy_path)
+        watcher = filetrace.TraceWatcher(fifo, self.view, denied, lambda **e: events.append(e))
         watcher.start()
         with open(fifo, "wb") as f:
             f.write("".join(lines).encode())
         watcher.finish()
         with open(path) as f:
-            return f.read(), events, copy_path
+            return f.read(), events
 
     def test_watcher_lists_only_what_follows_the_start_probe(self):
         probe = f'7  stat("{config.TRACE_START}", 0x1) = -1 ENOENT (x)\n'
@@ -1469,17 +1305,15 @@ class FileNotice(Fixture):
                  "8  " + failed("statx", "/opt/one") + "\n",
                  "9  " + failed("openat", "/usr/x", "EROFS", "O_WRONLY|O_CREAT") + "\n",
                  long_line, "garbage\n", '7  open("/cut\n']
-        listed, events, copy_path = self.watch(lines, copy=True)
+        listed, events = self.watch(lines)
         self.assertEqual(listed, "/opt\tnot mounted\n/usr/x\tread-only\n")
         self.assertEqual([e["path"] for e in events], ["/opt", "/usr/x"])
-        with open(copy_path) as f:
-            self.assertEqual(f.read(), "".join(lines))
 
     def test_watcher_collapses_a_filling_tmpfs_dir(self):
         probe = f'7  stat("{config.TRACE_START}", 0x1) = -1 ENOENT (x)\n'
         lines = [probe] + [f"8  " + failed("statx", f"{self.home}/.npm/_cacache/tmp/{n}/x") + "\n"
                            for n in range(50)]
-        listed, events, _ = self.watch(lines)
+        listed, events = self.watch(lines)
         self.assertEqual(listed, f"{self.home}/.npm\tnot mounted\n")
         self.assertEqual([e["path"] for e in events], [f"{self.home}/.npm"])
 
@@ -1489,7 +1323,7 @@ class FileNotice(Fixture):
         lines = [probe] + [f"8  " + failed("openat", f"{self.project}/t{n}/.env") + "\n"
                            for n in range(filetrace.BLOCKED_GROUP_LIMIT + 20)]
         lines.append("8  " + failed("openat", "/opt/later") + "\n")
-        _, events, _ = self.watch(lines)
+        _, events = self.watch(lines)
         files = [e for e in events if e["action"] == "file"]
         self.assertEqual(len(files), filetrace.BLOCKED_GROUP_LIMIT + 1)
         self.assertEqual(files[-1]["path"], "/opt")
@@ -1545,8 +1379,6 @@ class FileNotice(Fixture):
     def test_on_by_default_and_opt_out(self):
         out, _ = self.dry_run()
         self.assertTrue(out.startswith("/b/strace ") and " -Z " in out)
-        out, _ = self.dry_run("--trace")
-        self.assertTrue(out.startswith("/b/strace ") and " -Z " not in out)
         self.assertTrue(self.dry_run("--no-file-notice")[0].startswith("/b/bwrap "))
         self.write_profile("base", "[agent]\nfile_notice = false\n[fs]\nrw = [\"{project}\"]\n")
         self.assertTrue(self.dry_run()[0].startswith("/b/bwrap "))
@@ -1560,13 +1392,11 @@ class FileNotice(Fixture):
         self.assertTrue(out.startswith("/b/bwrap "))
         self.assertIn("strace not found", err)
 
-    def test_restricted_ptrace_only_warns_without_trace(self):
+    def test_restricted_ptrace_only_warns(self):
         with mock.patch.object(sb, "ptrace_allowed", lambda: False):
             out, err = self.dry_run()
             self.assertTrue(out.startswith("/b/bwrap "))
             self.assertIn("ptrace", err)
-            with self.assertRaisesRegex(config.ConfigError, "ptrace"):
-                self.dry_run("--trace")
 
 
 GB = 1 << 30

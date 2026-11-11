@@ -4,7 +4,7 @@ refused.
 
 strace runs outside the sandbox and reports failed file syscalls live. Each is classified
 against the plan, never against the host: checking the host would tell the sandbox which host
-paths exist. `pithos --trace` also keeps the whole trace for `pithos report`.
+paths exist.
 """
 
 import contextlib
@@ -14,19 +14,16 @@ import threading
 
 import proxy
 from config import (
-    ConfigError, SANDBOX_PYTHON, SYSTEM_FORBIDDEN, TRACE_START, clean, is_sensitive, is_within,
-    note,
+    SANDBOX_PYTHON, SYSTEM_FORBIDDEN, TRACE_START, clean, is_sensitive, is_within, note,
 )
 
 
-def strace_argv(strace, out_path, argv, failed_only=True):
+def strace_argv(strace, out_path, argv):
     """-D keeps bwrap the launcher's direct child, so --die-with-parent, exit codes and signal
     forwarding are unchanged. --seccomp-bpf stops only on file syscalls, -Z prints only the
     failed ones. Never add -v: it would print environment values on execve."""
     opts = [strace, "-D", "-f", "-qq", "-y", "--seccomp-bpf", "-e", "trace=%file",
-            "-e", "signal=none"]
-    if failed_only:
-        opts.append("-Z")
+            "-e", "signal=none", "-Z"]
     return [*opts, "-o", out_path, *argv]
 
 
@@ -37,15 +34,6 @@ def ptrace_allowed():
             return int(f.read().strip()) < 2
     except (OSError, ValueError):
         return True  # no Yama
-
-
-def create_trace_log(path):
-    """Created here so strace's -o can't follow a planted link and the log stays private."""
-    try:
-        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                         0o600))
-    except OSError as e:
-        raise ConfigError(f"cannot create trace log {path}: {e.strerror}")
 
 
 # -- reading strace's output -----------------------------------------------------------
@@ -63,8 +51,6 @@ TRACE_ERROR = re.compile(r"\) += -1 (E[A-Z0-9]+) \([^()]*\)$")
 TRACE_WRITE_FLAGS = re.compile(r"\bO_(?:WRONLY|RDWR|CREAT|TRUNC)\b")
 TRACE_WRITE_CALLS = re.compile(
     r"(?:mkdir|mknod|unlink|rmdir|rename|link|symlink|creat|truncate|f?chmod|f?chown|lchown|utime)")
-TRACE_MISSING = ("ENOENT", "ENOTDIR")
-TRACE_GROUPS = ("written", "read", "missing", "refused")
 
 
 def trace_calls(lines):
@@ -131,17 +117,6 @@ def parse_trace_call(text):
     return call, found, error.group(1) if error else None, writes
 
 
-def classify_trace_call(text):
-    """Return (group, paths) for one call, or None if it names no path."""
-    parsed = parse_trace_call(text)
-    if not parsed:
-        return None
-    _, found, error, writes = parsed
-    if error:
-        return ("missing" if error in TRACE_MISSING else "refused"), found
-    return ("written" if writes else "read"), found
-
-
 def sandbox_calls(lines):
     """trace_calls after the sandbox starts. Bwrap's own setup comes before the bridge's start
     probe (older traces: the bridge's execve) and is skipped; so is the probe itself."""
@@ -154,18 +129,6 @@ def sandbox_calls(lines):
             yield text
         else:
             started = text.startswith(TRACE_STARTS)
-
-
-def summarise_trace(lines):
-    """Count paths per group. A trace that never reaches the bridge counts nothing."""
-    groups = {name: {} for name in TRACE_GROUPS}
-    for text in sandbox_calls(lines):
-        result = classify_trace_call(text)
-        if result:
-            counts = groups[result[0]]
-            for path in result[1]:
-                counts[path] = counts.get(path, 0) + 1
-    return groups
 
 
 # -- telling the agent about refused file accesses -------------------------------------
@@ -288,12 +251,11 @@ class BlockedFiles:
 
 
 class TraceWatcher:
-    """Reads strace's output from a FIFO while the sandbox runs: copies it to the --trace log
-    if there is one, and lists refused accesses for the agent and the session log."""
+    """Reads strace's output from a FIFO while the sandbox runs, and lists refused accesses for
+    the agent and the session log."""
 
-    def __init__(self, fifo, view, denied, log=None, copy_path=None):
+    def __init__(self, fifo, view, denied, log=None):
         self.fifo, self.view, self.denied, self.log = fifo, view, denied, log
-        self.copy_path = copy_path
         self.logged = set()
         self.log_groups = {}
         self.thread = None
@@ -316,20 +278,16 @@ class TraceWatcher:
     def _run(self):
         try:
             with open(self.fifo, "rb") as f:
-                copy = open(self.copy_path, "ab") if self.copy_path else contextlib.nullcontext()
-                with copy:
-                    for text in sandbox_calls(self._lines(f, copy if self.copy_path else None)):
-                        self.check(text)
+                for text in sandbox_calls(self._lines(f)):
+                    self.check(text)
         except Exception as e:  # never take the session down: only the notice is lost
             note(f"file notice stopped: {clean(type(e).__name__)}")
 
     @staticmethod
-    def _lines(f, copy):
+    def _lines(f):
         """Lines of at most TRACE_LINE_MAX bytes; the rest of a longer line is dropped."""
         whole = True
         while raw := f.readline(TRACE_LINE_MAX):
-            if copy:
-                copy.write(raw)
             ends = raw.endswith(b"\n")
             if whole and ends:
                 yield raw.decode("ascii", "backslashreplace")
@@ -366,13 +324,3 @@ class TraceWatcher:
             return
         self.logged.add(path)
         self.log(action="file", path=path, reason=reason, error=error)
-
-
-def sum_traces(files):
-    totals = {name: {} for name in TRACE_GROUPS}
-    for path in files:
-        with open(path, encoding="ascii", errors="replace") as f:
-            for name, counts in summarise_trace(f).items():
-                for item, count in counts.items():
-                    totals[name][item] = totals[name].get(item, 0) + count
-    return totals

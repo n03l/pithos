@@ -36,7 +36,7 @@ the encrypted bytes, so certificates validate normally.
 
 ```sh
 sudo apt install bubblewrap
-sudo apt install strace          # optional: the file notice and --trace
+sudo apt install strace          # optional: the file notice
 ./install.sh            # links ~/.local/bin/pithos, copies profiles to ~/.config/pithos
 ```
 
@@ -382,21 +382,18 @@ on allowlisted hosts.
 
 ## Reviewing a session
 
-Each session leaves a proxy log, `<session>.jsonl`, in `~/.local/state/pithos/logs/`. Run with
-`--trace` to also get a file trace, `<session>.trace`, next to it. Both are written from outside
-the sandbox, which can't reach that directory.
+Each session leaves a proxy log, `<session>.jsonl`, in `~/.local/state/pithos/logs/`. It is
+written from outside the sandbox, which can't reach that directory.
 
 ```sh
-pithos --trace claude                 # record file accesses as well as network
 pithos report                         # the latest session
 pithos report --session 20260101-120000-abc123   # one session; the ID is the log's file name
 pithos report --all                   # every session combined
 ```
 
-`pithos report` is offline and rule-based. Without a trace, the detailed file sections are
-skipped, but what the file notice saw still appears: hidden paths the agent tried, and refused
-paths you might want to mount. For the raw data, `pithos log` prints the events of the last
-session, `pithos log --denied` the refused hosts and `pithos log --files` every traced path.
+`pithos report` is offline and rule-based. What the file notice saw appears here: hidden paths
+the agent tried, and refused paths you might want to mount. For the raw data, `pithos log` prints
+the events of the last session and `pithos log --denied` the refused hosts.
 
 ### Reviewing for security
 
@@ -405,54 +402,28 @@ Read the `SECURITY REVIEW` part of the report, most serious sections first:
 | Section | What it means | What to do |
 |---|---|---|
 | Network, policy violations | A TLS SNI that didn't match the requested host, a name resolving to a private address, or an invalid host | Rarely accidental: find out what made the request |
-| Sensitive paths touched | Credentials such as `.ssh`, `.aws` or `.env`, or a path in `fs.deny`. `missing` still counts, because those files don't exist in the sandbox and a probe fails with "not found" | Check why the agent looked there |
-| Protected project files, write attempts | Attempts on `.git/hooks` or `ro_in_project` paths, which would run later outside the sandbox | Treat as suspicious unless the task explains it |
 | Quarantined paths | The sandbox created a protected file, which was moved aside | Inspect it before using it |
 | Hosts tried and refused | Names not in `net.allow` | Look for hosts unrelated to the task, such as paste sites |
-| Hidden paths the agent tried | Credentials or `fs.deny` paths the file notice saw (without `--trace` too) | Check why the agent looked there |
+| Hidden paths the agent tried | Credentials or `fs.deny` paths the file notice saw | Check why the agent looked there |
 | Hosts contacted | Allowed connections, with counts | Check the volume looks right for the work |
-| Other refused file accesses | Other failed accesses, often harmless (`/dev/tty`) | Scan for patterns |
 
 An empty report doesn't prove a session was clean. The proxy never decrypts TLS, so the log shows
 hosts and not what was sent to them: data could still leave through an allowed host. See
-[Tracing file accesses](#tracing-file-accesses) for what a trace misses.
+[When a file is refused](#when-a-file-is-refused) for what the notice misses.
 
 ### Debugging and tuning a profile
 
-When a tool fails with a network error or can't find a file, run it again with `--trace`, then
-read `PROFILE TUNING`:
+When a tool fails with a network error or can't find a file, read `PROFILE TUNING`:
 
 - **Hosts to consider allowing** are ready to paste into `[net] allow`. Add only the ones you
   expect, or approve one for a running session with `pithos allow`.
-- **Looked for, absent in the sandbox, present on the host** are candidates for `fs.ro`. Review
-  each one first. Some are normal, like a symlink whose target isn't mounted.
-- **Refused file accesses the agent was told about** are the same idea from the file notice, so
-  they appear without `--trace` too.
+- **Refused file accesses the agent was told about** are the same idea from the file notice.
 - **Allowed but unused** is evidence from the sessions covered, not a reason on its own to remove
   a rule. Use `--all` over several sessions of the same profile and project before pruning.
 
 These checks use the rules recorded when the session started. Logs from older versions fall back
 to the profile as it is now. The checks are skipped when the rules can't be read or `--all` mixes
 different rules or projects.
-
-### Tracing file accesses
-
-`pithos --trace CMD` records every file access, not only the failed ones the file notice needs,
-and writes the trace to the logs directory, readable only by you (`strace` must be installed).
-`pithos log --files` then lists the paths of the last traced session in four groups, with
-counts:
-
-- `written` and `read`;
-- `missing`: not found, often because the profile doesn't mount them;
-- `refused`: other errors, such as writing to a read-only path.
-
-Add `--all` to combine every trace. Paths are as seen inside the sandbox, and relative ones appear
-as the program wrote them.
-
-Tracing slows the program down. The trace includes full `execve` command lines, so a secret passed
-as an argument ends up in it, but environment values don't. It is a debugging aid for tuning
-profiles, not a security audit: file opens made through `io_uring` don't appear, and each open is
-recorded rather than each read or write.
 
 ## Upgrading
 

@@ -63,7 +63,7 @@ Any change that touches one of these needs a test, both a hostile case and a nor
 - **The sandbox can't change its own rules.** Never mount these writable, and never mount
   them at all where avoidable:
   - the config dir;
-  - the state dir (trust store, logs, `--trace` files);
+  - the state dir (trust store, logs);
   - the runtime dir (proxy socket);
   - `$HOME` itself.
 - **Other sessions stay out.** The `claude` and `opencode-claude` profiles never mount `~/.claude`
@@ -122,8 +122,7 @@ Any change that touches one of these needs a test, both a hostile case and a nor
   variables are set last so profiles can't override them. Values reach `bwrap` via `--args FD`,
   never its argv (`/proc/<pid>/cmdline` is world-readable), and `--dry-run` redacts them.
 - **Tracing leaks no environment.** `strace_argv` must never pass `-v`, or `execve` lines would
-  record env values. The `--trace` log is created 0600 with `O_EXCL|O_NOFOLLOW` in the logs dir.
-  Its content is chosen by the sandbox, so `pithos log --files` prints it through `clean()`.
+  record env values.
 - **The file notice is one-way and never asks the host.** `strace` runs outside the sandbox and
   writes to a FIFO in the runtime dir, which is never mounted; `TraceWatcher` reads it. The list
   works like the blocked-hosts list: only `BlockedFiles` writes it, it is a single file bound
