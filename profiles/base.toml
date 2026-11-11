@@ -39,7 +39,6 @@ allow = [
 # amount ("16G", "4096"), or "none". Never more than the machine has. These are the defaults.
 # The sandbox runs in a systemd scope; without one pithos refuses to start (see --no-limits).
 processes = "15%"   # TasksMax: tasks in the sandbox, threads included (stops fork bombs)
-memory = "50%"      # RLIMIT_DATA, per process, only with --no-limits (see README)
 total = "75%"       # MemoryMax: the whole sandbox, tmpfs included
 tmpfs = "25%"       # each of ~, /tmp, /var/tmp and /dev/shm, which are RAM
 cpu = "100%"        # CPUQuota: percent of one CPU, so all of them by default
