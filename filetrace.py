@@ -180,7 +180,8 @@ BLOCKED_GROUP_LIMIT = 100
 FILE_EVENTS_LIMIT = 5000
 # Looked up by nearly every program, and never worth mounting.
 IGNORED_PROBES = ("/etc/ld.so.preload", "/etc/ld.so.nohwcap", "/etc/selinux", "/selinux",
-                  "/etc/gai.conf", "/etc/host.conf", "/etc/resolv.conf")
+                  "/etc/gai.conf", "/etc/host.conf", "/etc/resolv.conf",
+                  "/$bunfs")  # Bun's embedded files, never on disk
 MOUNT_KINDS = {"--bind": "rw", "--ro-bind": "ro", "--tmpfs": "tmpfs", "--symlink": "link"}
 
 
@@ -189,6 +190,7 @@ class SandboxView:
 
     def __init__(self, plan, home):
         self.mounts = {"/": "root", "/proc": "system", "/dev": "system"}
+        self.mount_dests = {dest for dest, _, _ in plan.mounts} | set(self.mounts)
         for dest, _, args in plan.mounts:
             kind = MOUNT_KINDS.get(args[0])
             if kind == "tmpfs":
@@ -230,6 +232,19 @@ class SandboxView:
                 return None
             return NOT_MOUNTED
         return None
+
+    def shown_path(self, path):
+        """The first level of a "not mounted" path with nothing mounted at or below it: the
+        whole of ~/.npm/_npx/... is one missing ~/.npm. Inside the writable home tmpfs the rest
+        is usually what a tool creates as it goes. Never a dir holding a hidden path."""
+        path = "/" + os.path.normpath(path).lstrip("/")
+        covered = self.mount_dests | set(self.hidden)
+        prefix = ""
+        for part in path.strip("/").split("/"):
+            prefix += "/" + part
+            if not any(is_within(dest, prefix) for dest in covered):
+                return prefix
+        return path
 
 
 def file_group(path, home):
@@ -280,6 +295,7 @@ class TraceWatcher:
         self.fifo, self.view, self.denied, self.log = fifo, view, denied, log
         self.copy_path = copy_path
         self.logged = set()
+        self.log_groups = {}
         self.thread = None
 
     def start(self):
@@ -330,11 +346,26 @@ class TraceWatcher:
             reason = self.view.reason(path, error, writes)
             if not reason:
                 continue
-            path = "/" + os.path.normpath(path).lstrip("/")
+            if reason == NOT_MOUNTED:
+                path = self.view.shown_path(path)
+            else:
+                path = "/" + os.path.normpath(path).lstrip("/")
             self.denied.add(path, reason)
             if self.log and path not in self.logged and len(self.logged) < FILE_EVENTS_LIMIT:
-                self.logged.add(path)
-                self.log(action="file", path=path, reason=reason, error=error)
+                self._log(path, reason, error)
+
+    def _log(self, path, reason, error):
+        """Like the agent's list, each top-level directory gets BLOCKED_GROUP_LIMIT events."""
+        group = file_group(path, self.view.home)
+        count = self.log_groups.get(group, 0)
+        if count > BLOCKED_GROUP_LIMIT:
+            return
+        self.log_groups[group] = count + 1
+        if count == BLOCKED_GROUP_LIMIT:
+            self.log(action="files_capped", group=group)
+            return
+        self.logged.add(path)
+        self.log(action="file", path=path, reason=reason, error=error)
 
 
 def sum_traces(files):

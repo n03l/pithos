@@ -132,8 +132,9 @@ Any change that touches one of these needs a test, both a hostile case and a nor
   the plan only: never `stat` a path the sandbox named on the host, which would tell it which
   host paths exist (and can hang on FUSE or autofs). Denied and sensitive paths are always
   reported as `hidden on purpose`, never as `not mounted`, so the agent isn't led to ask for
-  them. Everything before the start probe from `bridge.py` is setup done by `bwrap` and is
-  ignored.
+  them. `shown_path` shortens a `not mounted` path to its first unmounted level, never to a
+  dir that holds a mount or a hidden path. Everything before the start probe from `bridge.py`
+  is setup done by `bwrap` and is ignored.
 - **Resource limits can't be loosened from inside.** Every writable tmpfs is sized, and `/` and
   `/dev` (the unsized tmpfs that `bwrap` mounts) are remounted read-only after every mount.
   `bridge.py` sets soft and hard rlimits equal (`RLIMIT_CORE` 0, `RLIMIT_DATA`, and

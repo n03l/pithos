@@ -46,4 +46,5 @@ cpu = "100%"        # CPUQuota: percent of one CPU, so all of them by default
 
 [env]
 pass = ["TERM", "COLORTERM", "LANG", "LC_ALL", "TZ"]
-set = { PATH = "~/.local/bin:/usr/local/bin:/usr/bin:/bin" }
+# bytecode for read-only venvs and system Python: cached for the session, not rebuilt per run
+set = { PATH = "~/.local/bin:/usr/local/bin:/usr/bin:/bin", PYTHONPYCACHEPREFIX = "/tmp/pycache" }

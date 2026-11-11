@@ -170,9 +170,13 @@ way as for blocked hosts. Paths are classified from the profile alone: `pithos` 
 whether a path the sandbox asked for exists on your machine, since that would tell the sandbox.
 So the list also holds normal lookups of optional files, such as `~/.curlrc` or
 `~/.config/git/config`: Claude Code alone makes about 500 at start-up. Lookups along `PATH` and
-upward searches from the project (`node_modules`) are left out. Each top-level directory
-(`~/.npm`, `/etc`) gets at most 100 lines, then one `dir/*` line, so a noisy tool can't push out
-the path that matters; the agent is told to search the list for a path rather than read it whole.
+upward searches from the project (`node_modules`) are left out. A `not mounted` path is listed
+at its first level with nothing mounted at or below it: a miss on `~/.npm/_npx/a/b` is listed as
+`~/.npm`, once. Below that level the home directory is a writable tmpfs, so the rest are mostly
+files a tool hasn't created yet. Each top-level directory (`~/.npm`, `/etc`) gets at most 100
+lines, then one `dir/*` line, so a noisy tool can't push out the path that matters; the agent
+is told to search the list for a path rather than read it whole. The session log is capped the
+same way.
 
 To mount a path, add it to `fs.ro` or `fs.rw` and restart the session.
 

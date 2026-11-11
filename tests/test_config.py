@@ -1620,6 +1620,40 @@ class FileNotice(Fixture):
         self.assertEqual(self.reason(f"/opt/../{self.home}/.ssh/../.ssh/id_ed25519"), filetrace.HIDDEN)
         self.assertEqual(self.reason(f"//opt/x"), filetrace.NOT_MOUNTED)
 
+    def test_bun_virtual_files_are_ignored(self):
+        self.assertIsNone(self.reason("/$bunfs/root/chunk-qk6b3hm7.js"))
+
+    def test_unmounted_path_is_shown_at_its_first_unmounted_level(self):
+        """npm fills an empty ~/.npm in the home tmpfs: its hundreds of misses are one fact,
+        that ~/.npm isn't mounted. Paths under a partly mounted dir keep their next level."""
+        h = self.home
+        cases = {
+            f"{h}/.npm/_npx/9833/node_modules/x/package.json": f"{h}/.npm",
+            f"{h}/.npmrc": f"{h}/.npmrc",
+            "/opt/tool/bin/x": "/opt",
+            f"{h}/.config/unmounted-tool/a/b": f"{h}/.config/unmounted-tool",
+        }
+        self.write_profile("cfg", """
+            extends = "base"
+            [fs]
+            ro = ["~/.config/mounted-tool"]
+        """)
+        os.makedirs(os.path.join(h, ".config", "mounted-tool"))
+        view = filetrace.SandboxView(self.plan("cfg"), h)
+        for path, shown in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(view.reason(path, "ENOENT", False), filetrace.NOT_MOUNTED)
+                self.assertEqual(view.shown_path(path), shown)
+
+    def test_shown_path_never_widens_to_a_dir_holding_a_hidden_path(self):
+        """Reporting ~/.aws-like parents as "not mounted" would invite mounting the secret."""
+        view = self.view
+        view.hidden.append(f"{self.home}/.dir/inner/secret")
+        self.assertEqual(view.shown_path(f"{self.home}/.dir/other/x"), f"{self.home}/.dir/other")
+        self.assertEqual(view.shown_path(f"{self.home}/.dir/inner/x"), f"{self.home}/.dir/inner/x")
+        self.assertEqual(view.shown_path(f"{self.home}/.dir/inner/secret/x"),
+                         f"{self.home}/.dir/inner/secret/x")
+
     def test_write_refused_on_read_only_bind(self):
         self.assertEqual(self.reason("/usr/x", "EACCES", writes=True), filetrace.READ_ONLY)
         self.assertIsNone(self.reason("/usr/x", "EACCES", writes=False))
@@ -1691,10 +1725,32 @@ class FileNotice(Fixture):
                  "9  " + failed("openat", "/usr/x", "EROFS", "O_WRONLY|O_CREAT") + "\n",
                  long_line, "garbage\n", '7  open("/cut\n']
         listed, events, copy_path = self.watch(lines, copy=True)
-        self.assertEqual(listed, "/opt/one\tnot mounted\n/usr/x\tread-only\n")
-        self.assertEqual([e["path"] for e in events], ["/opt/one", "/usr/x"])
+        self.assertEqual(listed, "/opt\tnot mounted\n/usr/x\tread-only\n")
+        self.assertEqual([e["path"] for e in events], ["/opt", "/usr/x"])
         with open(copy_path) as f:
             self.assertEqual(f.read(), "".join(lines))
+
+    def test_watcher_collapses_a_filling_tmpfs_dir(self):
+        probe = f'7  stat("{config.TRACE_START}", 0x1) = -1 ENOENT (x)\n'
+        lines = [probe] + [f"8  " + failed("statx", f"{self.home}/.npm/_cacache/tmp/{n}/x") + "\n"
+                           for n in range(50)]
+        listed, events, _ = self.watch(lines)
+        self.assertEqual(listed, f"{self.home}/.npm\tnot mounted\n")
+        self.assertEqual([e["path"] for e in events], [f"{self.home}/.npm"])
+
+    def test_watcher_caps_logged_paths_per_group(self):
+        """Hidden paths keep their full name, so a noisy one is capped like the agent's list."""
+        probe = f'7  stat("{config.TRACE_START}", 0x1) = -1 ENOENT (x)\n'
+        lines = [probe] + [f"8  " + failed("openat", f"{self.project}/t{n}/.env") + "\n"
+                           for n in range(filetrace.BLOCKED_GROUP_LIMIT + 20)]
+        lines.append("8  " + failed("openat", "/opt/later") + "\n")
+        _, events, _ = self.watch(lines)
+        files = [e for e in events if e["action"] == "file"]
+        self.assertEqual(len(files), filetrace.BLOCKED_GROUP_LIMIT + 1)
+        self.assertEqual(files[-1]["path"], "/opt")
+        capped = [e for e in events if e["action"] == "files_capped"]
+        self.assertEqual(len(capped), 1)
+        self.assertEqual(capped[0]["group"], filetrace.file_group(self.project, self.home))
 
     def test_watcher_finishes_if_strace_never_opens_the_fifo(self):
         fifo = os.path.join(self.runtime, "trace.fifo")
