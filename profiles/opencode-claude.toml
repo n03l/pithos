@@ -5,10 +5,17 @@ extends = "opencode"
 
 [fs]
 ro = [
-  "~/.local/bin/claude", "~/.local/share/claude",
+  "~/.local/bin/claude",
+  "~/.local/share/claude",
   # user-level config the agent must not rewrite (hooks here run outside the sandbox too)
-  "~/.claude/settings.json", "~/.claude/CLAUDE.md", "~/.claude/plugins", "~/.claude/skills",
-  "~/.claude/commands", "~/.claude/agents", "~/.claude/hooks", "~/.claude/keybindings.json",
+  "~/.claude/settings.json",
+  "~/.claude/CLAUDE.md",
+  "~/.claude/plugins",
+  "~/.claude/skills",
+  "~/.claude/commands",
+  "~/.claude/agents",
+  "~/.claude/hooks",
+  "~/.claude/keybindings.json",
 ]
 # Claude Code refreshes its login token in this file.
 rw = ["~/.claude/.credentials.json"]
@@ -18,13 +25,18 @@ rw_mkdir = ["~/.claude/projects/{project_slug}"]
 
 [net]
 allow = [
-  "api.anthropic.com", "claude.ai", "console.anthropic.com", "platform.claude.com",
-  "statsig.anthropic.com", "mcp-proxy.anthropic.com",
+  "api.anthropic.com",
+  "claude.ai",
+  "console.anthropic.com",
+  "platform.claude.com",
+  "statsig.anthropic.com",
+  "mcp-proxy.anthropic.com",
 ]
 
-[env]
+[env.set]
 # no auto-update (binary dir is read-only) and no telemetry/error-reporting traffic
-set = { DISABLE_AUTOUPDATER = "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1" }
+DISABLE_AUTOUPDATER = "1"
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
 
 [agent]
 # Connects opencode to claude-agent once per project, so its models and your default work.

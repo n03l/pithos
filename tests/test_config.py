@@ -249,17 +249,36 @@ class Binds(Fixture):
         fds = sb.open_binds(plan)
         self.addCleanup(sb.close_fds, fds.values())
         hooks = os.path.join(self.project, ".git", "hooks")
-        self.assertEqual(set(fds), {"/usr", self.project, os.path.join(self.project, ".git"), hooks})
-        for src, fd in fds.items():
+        git = os.path.join(self.project, ".git")
+        self.assertEqual(set(fds), {("--ro-bind", "/usr", "/usr"),
+                                    ("--bind", self.project, self.project),
+                                    ("--bind", git, git), ("--ro-bind", hooks, hooks)})
+        for (_, src, _), fd in fds.items():
             st, host = os.fstat(fd), os.stat(src)
             self.assertEqual((st.st_dev, st.st_ino), (host.st_dev, host.st_ino), src)
         joined = " ".join(sb.bwrap_argv("bwrap", plan, self.project, ["x"], bind_fds=fds))
-        self.assertIn(f"--bind-fd {fds[self.project]} {self.project} ", joined)
-        self.assertIn(f"--ro-bind-fd {fds[hooks]} {hooks} ", joined)
-        self.assertIn(f"--ro-bind-fd {fds['/usr']} /usr ", joined)
+        self.assertIn(f"--bind-fd {fds['--bind', self.project, self.project]} {self.project} ", joined)
+        self.assertIn(f"--ro-bind-fd {fds['--ro-bind', hooks, hooks]} {hooks} ", joined)
+        self.assertIn(f"--ro-bind-fd {fds['--ro-bind', '/usr', '/usr']} /usr ", joined)
         self.assertNotIn(f"--bind {self.project} ", joined)
         self.assertIn(f"--ro-bind {self.runtime}/notice.md ", joined)  # pithos's own files: paths
         self.assertIn(f"--bind {self.project} ", " ".join(self.argv(plan)))  # --dry-run: paths
+
+    def test_same_source_bound_twice_gets_one_fd_per_mount(self):
+        # bwrap closes a --bind-fd fd after mounting it: a read-only project (rw from the
+        # profile, ro from .pithos.toml) needs a second fd, or bwrap fails "Can't stat fd".
+        self.write_profile("readonly", 'extends = "base"\n[fs]\nro = ["{project}"]\n')
+        plan = self.plan("readonly")
+        fds = sb.open_binds(plan)
+        self.addCleanup(sb.close_fds, fds.values())
+        rw, ro = fds["--bind", self.project, self.project], fds["--ro-bind", self.project, self.project]
+        self.assertNotEqual(rw, ro)
+        self.assertEqual(len(set(fds.values())), len(fds))
+        argv = sb.bwrap_argv("bwrap", plan, self.project, ["x"], bind_fds=fds)
+        self.assertEqual(sum(a in ("--bind-fd", "--ro-bind-fd") for a in argv), len(fds))
+        self.assertLess(argv.index(str(rw)), argv.index(str(ro)))  # ro mounted last: it wins
+        self.assertEqual(argv[argv.index(str(ro)) - 1], "--ro-bind-fd")
+        self.assertNotIn(os.path.join(self.project, ".git"), argv)  # no writable pin
 
     def test_bind_swapped_for_a_link_after_planning_is_refused(self):
         # Another session writes the same project: it can swap .git/hooks for a link to ~/.ssh

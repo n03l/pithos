@@ -282,8 +282,12 @@ ro_in_project = [".git/hooks"]         # read-only inside the writable project (
 allow = ["api.example.com", "*.example.org", "github.com:22"]   # port defaults to 443
 
 [env]
-pass = ["GOOGLE_GENERATIVE_AI_API_KEY"]  # copied from your environment; nothing else is
-set  = { PATH = "~/.opencode/bin:/usr/bin:/bin" }
+pass = [
+  "GOOGLE_GENERATIVE_AI_API_KEY",       # copied from your environment; nothing else is
+]
+
+[env.set]                               # set inside the sandbox
+PATH = "~/.opencode/bin:/usr/bin:/bin"
 
 [ssh]                                   # optional, see SSH below
 key = "~/.ssh/id_deploy"
@@ -296,8 +300,9 @@ To give an agent another directory, add it to `ro` or `rw`.
 
 ### Per-project rules
 
-Put the same sections (no `extends`) in `<project>/.pithos.toml`. The agent and the
-authors of repos you clone can both write that file, so it only applies once you approve it:
+Put the same sections in `<project>/.pithos.toml`, except `extends`, `[limits]` and
+`[agent]`, which only a profile may set. The agent and the authors of repos you clone can both
+write that file, so it only applies once you approve it:
 
 ```sh
 pithos trust      # shows the file and what it adds, records its hash
@@ -305,6 +310,15 @@ pithos trust      # shows the file and what it adds, records its hash
 
 If the file changes, the launcher refuses to start until you trust it again. Inside the
 sandbox the file is read-only.
+
+Lists are added to the profile's, not replaced, so a project can add paths and hosts, or hide
+more with `deny`. It can also take a mount away: listing `{project}` under `fs.ro` makes it
+read-only even though `base` mounts it writable, since `ro` wins over `rw` on the same path.
+
+```toml
+[fs]
+ro = ["{project}"]
+```
 
 ### Agent-specific behavior
 

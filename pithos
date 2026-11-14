@@ -286,7 +286,7 @@ class Plan:
         self.limits = None
         self.scoped = True  # limits.total, processes and cpu are enforced by a systemd scope
         self.publish = None  # (host address, port) from --publish
-        self.bind_sources = []  # host paths of the profile's binds: mounted by fd (open_binds)
+        self.bind_sources = []  # (flag, src, dest) of the profile's binds: mounted by fd (open_binds)
 
     def mount(self, dest, order, args):
         self.mounts.append((dest, order, args))
@@ -409,7 +409,7 @@ def build_plan(cfg, project, paths, runtime, environ=None, limits=None, scoped=T
         check_bind(mode, src, dest, paths, denied_roots)
         flag = "--bind" if mode == "rw" else "--ro-bind"
         plan.mount(dest, 1 if mode == "rw" else 2, [flag, src, dest])
-        plan.bind_sources.append(src)
+        plan.bind_sources.append((flag, src, dest))
 
     # Every writable tmpfs is sized: they are RAM. / and /dev are made read-only at the end of
     # bwrap's argv (bwrap_argv), so these and the binds are the only places to write.
@@ -618,11 +618,12 @@ def open_nofollow(path):
 
 
 def open_binds(plan):
-    """{host path: fd} for the profile's binds, for bwrap_argv. The caller closes the fds."""
+    """{(flag, src, dest): fd} for the profile's binds, for bwrap_argv. The caller closes the
+    fds. One fd per mount, even for the same source: bwrap closes a --bind-fd fd once used."""
     fds = {}
     try:
-        for src in dict.fromkeys(plan.bind_sources):
-            fds[src] = open_nofollow(src)
+        for bind in plan.bind_sources:
+            fds[bind] = open_nofollow(bind[1])
     except BaseException:
         close_fds(fds.values())
         raise
@@ -649,8 +650,8 @@ def bwrap_argv(bwrap, plan, project, cmd, env_fd=None, publish_fd=None, bind_fds
         # parent terminal; a new session prevents that (at the cost of job control).
         argv.append("--new-session")
     for _, _, args in sorted(plan.mounts, key=lambda m: (m[0].count("/"), m[1])):
-        if args[0] in ("--bind", "--ro-bind") and args[1] in bind_fds:
-            args = [args[0] + "-fd", str(bind_fds[args[1]]), args[2]]
+        if tuple(args) in bind_fds:
+            args = [args[0] + "-fd", str(bind_fds[tuple(args)]), args[2]]
         argv += args
     for args in plan.overlays:
         argv += args

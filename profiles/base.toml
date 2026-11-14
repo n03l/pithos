@@ -4,10 +4,23 @@
 [fs]
 ro = [
   "/usr",
-  "/etc/ssl", "/etc/ca-certificates", "/etc/alternatives", "/etc/ld.so.cache",
-  "/etc/passwd", "/etc/group", "/etc/nsswitch.conf", "/etc/hosts", "/etc/localtime",
-  "/etc/protocols", "/etc/services", "/etc/mime.types", "/etc/gitconfig", "/etc/inputrc",
-  "/etc/bash.bashrc", "/etc/terminfo", "/etc/chromium.d",
+  "/etc/ssl",
+  "/etc/ca-certificates",
+  "/etc/alternatives",
+  "/etc/ld.so.cache",
+  "/etc/passwd",
+  "/etc/group",
+  "/etc/nsswitch.conf",
+  "/etc/hosts",
+  "/etc/localtime",
+  "/etc/protocols",
+  "/etc/services",
+  "/etc/mime.types",
+  "/etc/gitconfig",
+  "/etc/inputrc",
+  "/etc/bash.bashrc",
+  "/etc/terminfo",
+  "/etc/chromium.d",
   "~/.gitconfig",
   "~/.venv",
 ]
@@ -15,22 +28,40 @@ rw = ["{project}"]
 # Hidden even when inside an allowed path (directories become empty, files empty).
 # Plain paths also make the launcher refuse any bind inside them.
 deny = [
-  "~/.ssh", "~/.gnupg", "~/.aws", "~/.config/gcloud", "~/.netrc", "~/.git-credentials",
-  "{project}/.env", "{project}/**/.env.*",
+  "~/.ssh",
+  "~/.gnupg",
+  "~/.aws",
+  "~/.config/gcloud",
+  "~/.netrc",
+  "~/.git-credentials",
+  "{project}/.env",
+  "{project}/**/.env.*",
 ]
 # Read-only inside the project: things that would run later, outside the sandbox. Entries
 # missing at start-up are moved aside after the session if the sandbox created them.
 ro_in_project = [
-  ".git/hooks", ".git/config", ".git/commondir", ".git/config.worktree",
-  ".claude/settings.json", ".claude/settings.local.json", ".mcp.json", "opencode.json",
-  ".envrc", ".vscode/settings.json", ".vscode/tasks.json", ".vscode/launch.json",
+  ".git/hooks",
+  ".git/config",
+  ".git/commondir",
+  ".git/config.worktree",
+  ".claude/settings.json",
+  ".claude/settings.local.json",
+  ".mcp.json",
+  "opencode.json",
+  ".envrc",
+  ".vscode/settings.json",
+  ".vscode/tasks.json",
+  ".vscode/launch.json",
 ]
 
 [net]
 # "host[:port]" (port defaults to 443) or "*.domain[:port]" for subdomains only.
 allow = [
-  "github.com", "codeload.github.com", "*.githubusercontent.com",
-  "pypi.org", "files.pythonhosted.org",
+  "github.com",
+  "codeload.github.com",
+  "*.githubusercontent.com",
+  "pypi.org",
+  "files.pythonhosted.org",
   "registry.npmjs.org",
 ]
 
@@ -44,6 +75,15 @@ tmpfs = "25%"       # each of ~, /tmp, /var/tmp and /dev/shm, which are RAM
 cpu = "100%"        # CPUQuota: percent of one CPU, so all of them by default
 
 [env]
-pass = ["TERM", "COLORTERM", "LANG", "LC_ALL", "TZ"]
+pass = [
+  "TERM",
+  "COLORTERM",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+]
+
+[env.set]
 # bytecode for read-only venvs and system Python: cached for the session, not rebuilt per run
-set = { PATH = "~/.local/bin:/usr/local/bin:/usr/bin:/bin", PYTHONPYCACHEPREFIX = "/tmp/pycache" }
+PATH = "~/.local/bin:/usr/local/bin:/usr/bin:/bin"
+PYTHONPYCACHEPREFIX = "/tmp/pycache"
