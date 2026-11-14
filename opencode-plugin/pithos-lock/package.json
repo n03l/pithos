@@ -5,6 +5,9 @@
   "description": "Shows in the footer whether opencode runs inside a pithos sandbox",
   "type": "module",
   "license": "MIT",
+  "scripts": {
+    "test": "node --test \"src/*.test.ts\""
+  },
   "exports": {
     "./tui": "./src/tui.tsx"
   },
