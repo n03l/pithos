@@ -296,7 +296,9 @@ def check_project(project, paths):
             raise ConfigError(f"refusing {project} as project: it is inside or contains {p}")
 
 
-def check_bind(mode, src, dest, paths, denied):
+def check_bind(src, dest, paths, denied):
+    """Refuse a bind of anything the sandbox must never see, read-only or not: home itself,
+    the config and state dirs, and their subpaths. `ro = ["~"]` would be the whole home."""
     for p in (src, dest):
         if p == "/":
             raise ConfigError("refusing to bind /")
@@ -306,13 +308,19 @@ def check_bind(mode, src, dest, paths, denied):
         for d in denied:
             if is_within(p, d):
                 raise ConfigError(f"refusing to bind {p}: it is inside denied {d}")
-        if mode == "rw":
-            for f in (paths.home, paths.config, paths.state):
-                if is_within(f, p):
-                    raise ConfigError(f"refusing to bind {p} writable: it contains {f}")
-            for f in (paths.config, paths.state):
-                if is_within(p, f):
-                    raise ConfigError(f"refusing to bind {p} writable: it is inside {f}")
+        for f in (paths.home, paths.config, paths.state):
+            if is_within(f, p):
+                raise ConfigError(f"refusing to bind {p}: it contains {f}")
+        for f in (paths.config, paths.state):
+            if is_within(p, f):
+                raise ConfigError(f"refusing to bind {p}: it is inside {f}")
+
+
+def check_project_link(where, dest, src, project):
+    """A path written with {project} must not resolve outside it: `pithos trust` shows the
+    text, and a symlink committed in the repo decides what the path points at."""
+    if is_within(dest, project) and not is_within(src, project):
+        raise ConfigError(f"{where}: {clean(dest)} links outside the project ({clean(src)})")
 
 
 def has_glob(value):

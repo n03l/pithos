@@ -315,6 +315,8 @@ sandbox the file is read-only.
 Lists are added to the profile's, not replaced, so a project can add paths and hosts, or hide
 more with `deny`. It can also take a mount away: listing `{project}` under `fs.ro` makes it
 read-only even though `base` mounts it writable, since `ro` wins over `rw` on the same path.
+A path written with `{project}` must resolve inside the project: a symlink committed in the
+repo can't point the entry somewhere you didn't review.
 
 ```toml
 [fs]
@@ -374,9 +376,9 @@ on allowlisted hosts.
 |---|---|
 | Reading keys, tokens, other repos | Only listed paths are mounted. `deny` hides paths inside them, and the launcher refuses to mount anything inside a denied path. |
 | Reading other sessions | The `claude` profile mounts only `.credentials.json` and this project's `~/.claude/projects/<slug>`. History, other projects' transcripts and memory, `file-history` and `paste-cache` stay on the host; the rest of `~/.claude` is a fresh tmpfs. |
-| Rewriting its own sandbox | The config dir, the trust store and the runtime sockets are never mounted. Binding them, `~`, `/`, `/run` or `/tmp` writable is refused. |
+| Rewriting its own sandbox | The config dir, the trust store and the runtime sockets are never mounted. Binding `~`, the config or state dir, `/`, `/run` or `/tmp` is refused, writable or not. |
 | Code that runs later, outside the sandbox | `.git/hooks`, `.git/config` (also for submodules under `.git/modules`), `.claude/settings*.json`, `.mcp.json`, `opencode.json`, `.envrc`, `.vscode/{settings,tasks,launch}.json` and `~/.claude/settings.json`, plugins and skills are read-only, and their parent directories can't be renamed away. Ones missing at start-up are moved aside after the session if the sandbox created them. |
-| Symlink tricks in the project | Links resolve inside the sandbox, so they can't reach unmounted paths. A `ro_in_project` entry that links outside the project is refused. |
+| Symlink tricks in the project | Links resolve inside the sandbox, so they can't reach unmounted paths. A path written with `{project}` that resolves outside the project is refused, so a symlink committed in a repo can't point a reviewed entry at `~`. |
 | Exfiltration to arbitrary hosts | Only the allowlist is reachable: no DNS, no raw sockets, no UDP. |
 | Approving its own hosts | Approvals live in the state dir, which is never mounted. The sandbox can only get a name denied; you decide from outside. Private and loopback IPs can't be approved this way. |
 | DNS rebinding, cloud metadata | A host name that resolves to a private, loopback or link-local address is refused. |

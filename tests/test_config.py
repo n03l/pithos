@@ -122,8 +122,12 @@ class Binds(Fixture):
 
     def test_refuses_dangerous_binds(self):
         self.bad('[fs]\nrw = ["~"]')
+        self.bad('[fs]\nro = ["~"]')  # the whole home, read-only
         self.bad('[fs]\nrw = ["~/.config"]')  # would expose the config dir writable
+        self.bad('[fs]\nro = ["~/.config"]')  # and read-only
+        self.bad('[fs]\nro = ["~/.config/pithos"]')
         self.bad('[fs]\nrw = ["~/.local/state/pithos/x"]')
+        self.bad('[fs]\nro = ["~/.local/state/pithos/logs"]')  # every session log
         self.bad('[fs]\nro = ["/"]')
         self.bad('[fs]\nro = ["/run/user"]')
         self.bad('[fs]\nro = ["/var"]')  # contains /var/run
@@ -157,6 +161,31 @@ class Binds(Fixture):
         cfg = config.load_profile(self.paths, "p")
         with self.assertRaises(config.ConfigError):
             sb.build_plan(cfg, self.project, self.paths, self.runtime, {})
+
+    def test_a_project_link_cannot_reach_outside_the_project(self):
+        # The repo commits `vendor -> ../../.local/bin`, so the trust review sees a
+        # project-local path and the plan resolves it to the host's home.
+        os.makedirs(os.path.join(self.home, ".local", "bin"))
+        open(os.path.join(self.home, ".bashrc"), "w").close()
+        link = os.path.join(self.project, "vendor")
+        for target in (os.path.join(self.home, ".local", "bin"),
+                       os.path.join(self.home, ".bashrc")):
+            with self.subTest(target=target):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(link)
+                os.symlink(os.path.relpath(target, self.project), link)
+                for text in ('rw = ["{project}/vendor"]', 'ro = ["{project}/vendor"]',
+                             'rw_mkdir = ["{project}/vendor/new"]',
+                             'copy = ["{project}/vendor"]'):
+                    with self.subTest(text=text):
+                        self.bad(f"[fs]\n{text}")
+
+    def test_a_project_link_inside_the_project_is_still_mounted(self):
+        os.makedirs(os.path.join(self.project, "real"))
+        os.symlink("real", os.path.join(self.project, "alias"))
+        self.write_profile("p", '[fs]\nrw = ["{project}"]\nro = ["{project}/alias"]')
+        joined = " ".join(self.argv(self.plan("p")))
+        self.assertIn(f"--ro-bind {self.project}/real {self.project}/alias ", joined)
 
     def test_ro_in_project_ancestors_are_pinned(self):
         # A mount point can't be renamed, so the sandbox can't `mv .git .git.x` and

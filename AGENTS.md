@@ -78,8 +78,9 @@ Any change that touches one of these needs a test, both a hostile case and a nor
   History, other projects' transcripts and memory, `file-history` and `paste-cache` stay outside.
 - **Project config fails closed.** `.pithos.toml` applies only when its SHA-256 matches
   the trust store. It is always bound read-only, may not use `extends`, and must not be a symlink.
-- **`deny` wins.** Plain `deny` paths also refuse any bind inside them. `ro_in_project`
-  entries must resolve inside the project, so a symlink to `~/.ssh` is refused. Their parent
+- **`deny` wins.** Plain `deny` paths also refuse any bind inside them. Every path a profile
+  or `.pithos.toml` writes with `{project}` must resolve inside the project, so a committed
+  symlink can't point a reviewed entry at `~`; `ro_in_project` entries are the same. Their parent
   directories (`.git`, `.claude`) are bound onto themselves so they can't be renamed away and
   recreated. That pin is writable, so it only happens where the closest profile bind above the
   entry is writable (`enclosing_mode`): in a read-only or unbound project the entries are

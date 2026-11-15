@@ -39,9 +39,9 @@ from config import (  # noqa: E402
     ALWAYS_RO_IN_PROJECT, ConfigError, ENV_NAME, PROFILE_NAME, PROJECT_FILE, Paths,
     SANDBOX_BLOCKED_FILES, SANDBOX_BLOCKED_HOSTS, SANDBOX_CLAUDE_AGENT, SANDBOX_LIMIT_EVENTS,
     SANDBOX_NOTICE, SANDBOX_OPENCODE_CONFIG, SANDBOX_PYTHON, SANDBOX_RUN, check_bind,
-    check_project, clean, expand, expand_glob, expand_path, has_glob, is_within, load_profile,
-    load_project, merge, note, parse_project_file, read_json_table, read_project_file,
-    read_trusted, write_private_json,
+    check_project, check_project_link, clean, expand, expand_glob, expand_path, has_glob,
+    is_within, load_profile, load_project, merge, note, parse_project_file, read_json_table,
+    read_project_file, read_trusted, write_private_json,
 )
 from resources import (  # noqa: E402
     LimitEvents, ScopeMonitor, bridge_limits, check_scope, describe_limits, find_systemd_run,
@@ -340,7 +340,8 @@ def build_plan(cfg, project, paths, runtime, environ=None, limits=None, scoped=T
         for value in fs.get(key, []):
             dest = expand_path(value, project, paths)
             src = os.path.realpath(dest)
-            check_bind(mode, src, dest, paths, denied_roots)
+            check_project_link(f"fs.{key}", dest, src, project)
+            check_bind(src, dest, paths, denied_roots)
             if key == "rw_mkdir":
                 if os.path.lexists(src) and not os.path.isdir(src):
                     raise ConfigError(f"fs.rw_mkdir: {dest} exists and is not a directory")
@@ -354,7 +355,8 @@ def build_plan(cfg, project, paths, runtime, environ=None, limits=None, scoped=T
     for n, value in enumerate(fs.get("copy", [])):
         dest = expand_path(value, project, paths)
         src = os.path.realpath(dest)
-        check_bind("rw", src, dest, paths, denied_roots)
+        check_project_link("fs.copy", dest, src, project)
+        check_bind(src, dest, paths, denied_roots)
         if not os.path.lexists(dest):
             plan.skipped.append(f"copy {dest} (missing)")
             continue
@@ -396,7 +398,8 @@ def build_plan(cfg, project, paths, runtime, environ=None, limits=None, scoped=T
     if "notice_into" in cfg.get("agent", {}):
         dest = expand_path(cfg["agent"]["notice_into"], project, paths)
         src = os.path.realpath(dest)
-        check_bind("ro", src, dest, paths, denied_roots)
+        check_project_link("agent.notice_into", dest, src, project)
+        check_bind(src, dest, paths, denied_roots)
         if os.path.lexists(src) and not os.path.isfile(src):
             raise ConfigError(f"agent.notice_into: {dest} is not a regular file")
         notice = os.path.join(runtime, "agent-notice.md")
@@ -406,7 +409,7 @@ def build_plan(cfg, project, paths, runtime, environ=None, limits=None, scoped=T
     for mode, src, dest in dict.fromkeys(binds):
         if mode == "copy":
             continue
-        check_bind(mode, src, dest, paths, denied_roots)
+        check_bind(src, dest, paths, denied_roots)
         flag = "--bind" if mode == "rw" else "--ro-bind"
         plan.mount(dest, 1 if mode == "rw" else 2, [flag, src, dest])
         plan.bind_sources.append((flag, src, dest))
