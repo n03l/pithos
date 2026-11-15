@@ -84,8 +84,10 @@ Any change that touches one of these needs a test, both a hostile case and a nor
   directories (`.git`, `.claude`) are bound onto themselves so they can't be renamed away and
   recreated. That pin is writable, so it only happens where the closest profile bind above the
   entry is writable (`enclosing_mode`): in a read-only or unbound project the entries are
-  skipped. A parent that is a symlink is refused. Entries missing at start-up are moved aside
-  after the session if they appeared (`quarantine`). Submodule git dirs under
+  skipped. A parent that is a symlink is refused, and an entry that names the project itself is
+  too (pinning its parent would walk past `/`). Entries missing at start-up are moved aside
+  after the session if they appeared (`quarantine`); a link the sandbox put on the way is what
+  moves, since renaming through it would move its target. Submodule git dirs under
   `.git/modules` get the same protection as `.git` (`GITDIR_FILES`); new ones are quarantined.
   Deny globs escape `{project}` and `~`, and a denied symlink also hides its target wherever a
   bind shows it.

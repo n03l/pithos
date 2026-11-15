@@ -402,7 +402,8 @@ on allowlisted hosts.
   so on outside the sandbox.
 - **Protected files that don't exist yet can be created.** `ro_in_project` paths that are missing
   at start-up (say, the project has no `.git` yet) can be created during the session. When it
-  ends, the launcher moves them aside to `<path>.pithos-quarantine-<session>` and warns. Until
+  ends, the launcher moves them aside to `<path>.pithos-quarantine-<session>` and warns. If the
+  sandbox reached the path through a link of its own, the link is moved aside instead. Until
   then, don't run `git` or the agent on the host in that project.
 - **Saved approvals follow the project path, not its contents.** A different repo later placed at
   the same path gets them too. Check with `pithos allow --list`.

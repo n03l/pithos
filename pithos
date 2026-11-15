@@ -383,6 +383,9 @@ def build_plan(cfg, project, paths, runtime, environ=None, limits=None, scoped=T
         if os.path.isabs(rel) or ".." in rel.split("/"):
             raise ConfigError(f"fs.ro_in_project entries must be relative: {clean(rel)!r}")
         dest = os.path.normpath(os.path.join(project, rel))
+        if dest == project:
+            raise ConfigError(f"fs.ro_in_project must name a path inside the project: "
+                              f"{clean(rel)!r}")
         if enclosing_mode(dest, profile_binds) != "rw":
             continue  # read-only already, or not in the sandbox: pinning would make it writable
         if not os.path.lexists(dest):
@@ -590,17 +593,31 @@ def agent_command(cfg, cmd):
     return cmd
 
 
+def first_link(project, path):
+    """The first path part below project that is a link, or None."""
+    parts = os.path.relpath(path, project).split(os.sep)
+    for depth in range(1, len(parts)):
+        candidate = os.path.join(project, *parts[:depth])
+        if os.path.islink(candidate):
+            return candidate
+    return None
+
+
 def quarantine(plan, session):
     """Move aside ro_in_project paths the sandbox created (they were missing at start), so
-    host tools don't run them. Returns the paths moved."""
+    host tools don't run them. Returns the paths moved. A path behind a link the sandbox made
+    is reached by moving the link: renaming the path would follow it."""
     planted = []
     for path in plan.watch:
         if not os.path.lexists(path):
             continue
         parent = os.path.dirname(path)
         if os.path.realpath(parent) != parent:
-            note(f"WARNING: {clean(path)} appeared during the session behind a link; check it")
-            continue
+            link = first_link(plan.project, path) if plan.project else None
+            if link is None:
+                note(f"WARNING: {clean(path)} appeared during the session behind a link; check it")
+                continue
+            path = link
         planted.append(path)
     # Submodule git dirs and links that appeared under .git/modules during the session.
     git = os.path.join(plan.project, ".git") if plan.project else None

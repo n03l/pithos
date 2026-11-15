@@ -135,6 +135,9 @@ class Binds(Fixture):
         self.bad('[fs]\nro = ["relative/path"]')
         self.bad('[fs]\nro = ["{home}/x"]')
         self.bad('[fs]\nro_in_project = ["../escape"]')
+        for rel in ("", ".", "./"):  # the project itself: the ancestor pin would walk past /
+            with self.subTest(rel=rel):
+                self.bad(f'[fs]\nrw = ["{{project}}"]\nro_in_project = ["{rel}"]')
         self.bad('[env]\nset = { "BAD NAME" = "x" }')
         self.bad('[env]\npass = ["A=B"]')
 
@@ -389,16 +392,31 @@ class Binds(Fixture):
         self.assertFalse(os.path.lexists(planted))
         self.assertTrue(os.path.isdir(os.path.join(self.project, ".git", "hooks")))
 
-    def test_quarantine_never_follows_a_planted_link(self):
+    def test_quarantine_moves_a_planted_link_and_not_its_target(self):
         outside = os.path.join(self.home, "outside")
         os.makedirs(outside)
         open(os.path.join(outside, "settings.json"), "w").close()
         self.write_profile("p", '[fs]\nrw = ["{project}"]\nro_in_project = [".claude/settings.json"]')
         plan = sb.build_plan(config.load_profile(self.paths, "p"), self.project, self.paths,
                              self.runtime, {})
-        os.symlink(outside, os.path.join(self.project, ".claude"))
-        self.assertEqual(sb.quarantine(plan, "s1"), [])
+        link = os.path.join(self.project, ".claude")
+        os.symlink(outside, link)
+        self.assertEqual(sb.quarantine(plan, "s1"), [link + ".pithos-quarantine-s1"])
+        self.assertFalse(os.path.lexists(link))
         self.assertTrue(os.path.exists(os.path.join(outside, "settings.json")))
+
+    def test_a_planted_link_leaves_no_reachable_protected_file(self):
+        self.write_profile("p", '[fs]\nrw = ["{project}"]\nro_in_project = [".vscode/tasks.json"]')
+        plan = sb.build_plan(config.load_profile(self.paths, "p"), self.project, self.paths,
+                             self.runtime, {})
+        os.makedirs(os.path.join(self.project, "docs"))
+        with open(os.path.join(self.project, "docs", "tasks.json"), "w") as f:
+            f.write("planted")
+        os.symlink("docs", os.path.join(self.project, ".vscode"))
+        moved = sb.quarantine(plan, "s1")
+        self.assertEqual(moved, [os.path.join(self.project, ".vscode") + ".pithos-quarantine-s1"])
+        self.assertFalse(os.path.lexists(os.path.join(self.project, ".vscode", "tasks.json")))
+        self.assertTrue(os.path.exists(os.path.join(self.project, "docs", "tasks.json")))
 
     def make_gitdir(self, rel):
         path = os.path.join(self.project, rel)
