@@ -104,6 +104,10 @@ Any change that touches one of these needs a test, both a hostile case and a nor
   host names and fixed reasons only, is capped, and is appended to in place because the bind
   pins the inode. The agent notice (`agent.notice_into`) is a read-only overlay, and
   `.pithos.toml` may not set it.
+- **The config file names no source.** `/run/pithos/config.md` is written once from the plan and
+  bound read-only: destinations, allowed hosts and limits only. Never a bind source (it can be a
+  symlink target outside the project) or a `deny` pattern (it names a host path the sandbox must
+  not learn exists).
 - **Published ports only let browsers in from their own origin.** `--publish` is command line
   only: no profile key, and `.pithos.toml` can't set it.
   - The address is one IP literal: no host names, no `0.0.0.0` or `::`, never `PROXY_PORT`.

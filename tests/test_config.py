@@ -695,10 +695,52 @@ class AgentNotice(Fixture):
 
     def test_runtime_files_exist_for_every_bind(self):
         sb.write_runtime_files(self.runtime)
-        for name in ("empty", "blocked-hosts", "notice.md", "opencode.json"):
+        for name in ("empty", "blocked-hosts", "notice.md", "opencode.json", "config.md"):
             self.assertTrue(os.path.isfile(os.path.join(self.runtime, name)), name)
         with open(os.path.join(self.runtime, "opencode.json")) as f:
             self.assertEqual(json.load(f), {"instructions": [config.SANDBOX_NOTICE]})
+
+
+class ConfigFile(Fixture):
+    LIMITS = {"processes": 4096, "memory": None, "total": 6 << 30, "tmpfs": 2 << 30, "cpu": 2}
+
+    def plan(self, profile="base"):
+        cfg = config.merge(config.load_profile(self.paths, profile),
+                           config.load_project(self.paths, self.project))
+        return sb.build_plan(cfg, self.project, self.paths, self.runtime,
+                             limits=self.LIMITS, scoped=True)
+
+    def text(self, profile="base"):
+        plan = self.plan(profile)
+        plan.profile = profile
+        sb.write_runtime_files(self.runtime, config=sb.describe_config(plan))
+        with open(os.path.join(self.runtime, "config.md")) as f:
+            return f.read()
+
+    def test_lists_what_the_sandbox_can_see(self):
+        argv = " ".join(self.argv(self.plan()))
+        self.assertIn(f"--ro-bind {self.runtime}/config.md {config.SANDBOX_CONFIG} ", argv)
+        text = self.text()
+        self.assertIn("profile: base", text)
+        self.assertIn(f"project: {self.project}", text)
+        self.assertIn(f"- {self.project}\n", text)  # rw
+        self.assertIn("- /usr\n", text)  # ro
+        self.assertIn("- github.com", text)  # allowed host
+        self.assertIn("limits: processes 4096", text)
+        self.assertIn("- /tmp (2G)", text)  # tmpfs, with its size
+
+    def test_names_no_host_path_outside_the_project(self):
+        # deny names host paths the sandbox shouldn't learn exist, and a bind's source can be
+        # a symlink target elsewhere in the home.
+        os.makedirs(os.path.join(self.home, "dotfiles"))
+        open(os.path.join(self.home, "dotfiles", "cfg"), "w").close()
+        os.symlink(os.path.join(self.home, "dotfiles", "cfg"), os.path.join(self.home, ".cfg"))
+        self.write_profile("links", 'extends = "base"\n[fs]\nro = ["~/.cfg"]')
+        text = self.text("links")
+        self.assertIn(f"- {self.home}/.cfg\n", text)
+        self.assertNotIn("dotfiles", text)
+        self.assertNotIn(".ssh", text)
+        self.assertNotIn("bin:/usr/bin", text)  # env.set values are not shown
 
 
 class ProjectFile(Fixture):

@@ -79,6 +79,10 @@ home directory or a directory that contains your config.
 Inside `tmux`, `pithos` names the window after the agent (e.g. `claude`). That needs the
 `tmux` setting `setw -g allow-rename on`.
 
+The sandbox's own copy of its configuration is `/run/pithos/config.md`: the profile, the
+project, the limits, every mounted path as `rw` or `ro`, and the allowed hosts. Ask the agent to
+read it when you want to know what a session can see.
+
 ## Web UI and servers in the sandbox
 
 The sandbox has its own network, so a server started in it can't be reached from the host.
