@@ -231,6 +231,109 @@ def load_project(paths, project):
     return parse_project_file(project, raw)
 
 
+# -- editing the project file's fs lists -----------------------------------------------
+
+def toml_array_spans(text, start):
+    """(spans of the string literals, index of the closing ']') for the TOML array whose
+    '[' is at text[start]. Anything but strings, commas, whitespace and comments is refused."""
+    if text[start] != "[":
+        raise ConfigError(f"{PROJECT_FILE}: expected a list")
+    spans, i = [], start + 1
+    while i < len(text):
+        c = text[i]
+        if c in " \t\r\n,":
+            i += 1
+        elif c == "#":
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+        elif text[i:i + 3] in ('"""', "'''"):
+            raise ConfigError(f"{PROJECT_FILE}: multi-line strings are not supported")
+        elif c in "\"'":
+            j = i + 1
+            while j < len(text) and text[j] != c:
+                j += 2 if c == '"' and text[j] == "\\" else 1
+            if j >= len(text):
+                raise ConfigError(f"{PROJECT_FILE}: unterminated string")
+            spans.append((i, j + 1))
+            i = j + 1
+        elif c == "]":
+            return spans, i
+        else:
+            raise ConfigError(f"{PROJECT_FILE}: unsupported value in a list")
+    raise ConfigError(f"{PROJECT_FILE}: unterminated list")
+
+
+def fs_table_span(text):
+    """(start, end) of the [fs] table's body: the lines after its header, up to the next
+    table header. None when the file has no [fs] table."""
+    header = re.search(r"^[ \t]*\[[ \t]*fs[ \t]*\][^\n]*\n", text, re.M)
+    if header is None:
+        return None
+    nxt = re.search(r"^[ \t]*\[", text[header.end():], re.M)
+    return header.end(), header.end() + (nxt.start() if nxt else len(text) - header.end())
+
+
+def drop_span(text, start, s, e, close):
+    """Delete text[s:e] and one comma next to it, leaving a valid array."""
+    before = text.rfind(",", start, s)
+    if before >= 0 and not text[before + 1:s].strip():
+        return text[:before] + text[e:]
+    after = text.find(",", e, close)
+    if after >= 0 and not text[e:after].strip():
+        return text[:s] + text[after + 1:]
+    return text[:s] + text[e:]
+
+
+def edit_list(text, key, add=(), remove=()):
+    """Add and remove strings in the `fs.<key>` array of a .pithos.toml text, keeping every
+    other byte of the file. Refuses a layout it can't splice, before writing anything."""
+    body = fs_table_span(text)
+    if body is None:
+        if re.search(r"^[ \t]*fs[ \t]*[.\[]", text, re.M):
+            raise ConfigError(f"{PROJECT_FILE}: 'fs' is a dotted or inline key; edit it by hand")
+        if not add:
+            raise ConfigError(f"{PROJECT_FILE}: no [fs] table to remove fs.{key} from")
+        sep = "" if text.endswith("\n") or not text else "\n"
+        return text + sep + f"[fs]\n{key} = [" + ", ".join(json.dumps(v) for v in add) + "]\n"
+    start, end = body
+    line = re.compile(r"^[ \t]*" + key + r"[ \t]*=[ \t]*", re.M).search(text, start, end)
+    if line is None:
+        if remove:
+            raise ConfigError(f"{PROJECT_FILE}: fs.{key} is not set")
+        gap = "" if start == end or text[start:end].endswith("\n") else "\n"
+        new = f"{key} = [" + ", ".join(json.dumps(v) for v in add) + "]\n"
+        return text[:end] + gap + new + text[end:]
+    at = line.end()
+    if at >= len(text) or text[at] != "[":
+        raise ConfigError(f"{PROJECT_FILE}: fs.{key} is not a list; edit it by hand")
+    for value in remove:
+        spans, close = toml_array_spans(text, at)
+        for s, e in spans:
+            if tomllib.loads("v = " + text[s:e])["v"] == value:
+                text = drop_span(text, at, s, e, close)
+                break
+        else:
+            raise ConfigError(f"{PROJECT_FILE}: fs.{key} has no {clean(value)!r}")
+    for value in add:
+        spans, close = toml_array_spans(text, at)
+        if any(tomllib.loads("v = " + text[s:e])["v"] == value for s, e in spans):
+            continue
+        literal = json.dumps(value)
+        if spans:
+            text = text[:spans[-1][1]] + ", " + literal + text[spans[-1][1]:]
+        else:
+            text = text[:at + 1] + literal + text[at + 1:]
+    return text
+
+
+def short_path(real, project, paths):
+    """A path as a project file writes it: {project}/…, ~/… or absolute."""
+    for base, prefix in ((project, "{project}"), (paths.home, "~")):
+        if real != base and is_within(real, base):
+            return prefix + real[len(base):]
+    return real
+
+
 def write_private_json(path, data):
     """Replace path atomically; mkstemp makes the file 0600."""
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")

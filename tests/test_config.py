@@ -806,6 +806,55 @@ class ProjectFile(Fixture):
             self.plan()
 
 
+class ProjectEdit(Fixture):
+    def test_add_keeps_the_rest_of_the_file(self):
+        text = 'x = 1\n\n[fs]\nro = ["/usr", "~/a"]  # system\n\n[net]\nallow = ["a"]\n'
+        new = config.edit_list(text, "ro", add=["~/b"])
+        self.assertEqual(new, 'x = 1\n\n[fs]\nro = ["/usr", "~/a", "~/b"]  # system\n\n'
+                              '[net]\nallow = ["a"]\n')
+
+    def test_multiline_array_keeps_comments(self):
+        text = '[fs]\nro = [\n  "/usr",  # tools\n  "~/a",\n]\n'
+        new = config.edit_list(text, "ro", add=["~/b"])
+        self.assertIn('  "/usr",  # tools\n', new)
+        self.assertEqual(tomllib.loads(new)["fs"]["ro"], ["/usr", "~/a", "~/b"])
+
+    def test_adds_the_key_to_an_existing_table(self):
+        new = config.edit_list('[fs]\ndeny = []\n[net]\n', "ro", add=["~/a"])
+        self.assertEqual(tomllib.loads(new), {"fs": {"deny": [], "ro": ["~/a"]}, "net": {}})
+
+    def test_adds_the_table_without_a_trailing_newline(self):
+        self.assertEqual(config.edit_list('x = 1', "rw", add=["~/a"]),
+                         'x = 1\n[fs]\nrw = ["~/a"]\n')
+
+    def test_removes_one_entry_and_its_comma(self):
+        new = config.edit_list('[fs]\nro = ["/usr", "~/a", "~/b"]\n', "ro", remove=["~/a"])
+        self.assertEqual(tomllib.loads(new)["fs"]["ro"], ["/usr", "~/b"])
+
+    def test_remove_the_only_entry(self):
+        new = config.edit_list('[fs]\nro = ["~/a"]\n', "ro", remove=["~/a"])
+        self.assertEqual(tomllib.loads(new)["fs"]["ro"], [])
+
+    def test_refuses_dotted_keys(self):
+        with self.assertRaises(config.ConfigError):
+            config.edit_list('fs.ro = ["/usr"]\n', "ro", add=["~/a"])
+
+    def test_refuses_an_inline_table(self):
+        with self.assertRaises(config.ConfigError):
+            config.edit_list('[fs]\nro = { a = "b" }\n', "ro", add=["~/a"])
+
+    def test_refuses_a_multiline_string(self):
+        with self.assertRaises(config.ConfigError):
+            config.edit_list('[fs]\nro = ["""a"""]\n', "ro", add=["~/b"])
+
+    def test_short_path(self):
+        self.assertEqual(config.short_path(self.project + "/d", self.project, self.paths),
+                         "{project}/d")
+        self.assertEqual(config.short_path(self.home + "/d", self.project, self.paths), "~/d")
+        self.assertEqual(config.short_path("/srv/d", self.project, self.paths), "/srv/d")
+        self.assertEqual(config.short_path(self.home, self.project, self.paths), self.home)
+
+
 class AllowCommand(Fixture):
     def setUp(self):
         super().setUp()
