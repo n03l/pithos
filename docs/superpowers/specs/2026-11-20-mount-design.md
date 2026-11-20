@@ -46,12 +46,18 @@ pithos mount --list                         # show both lists
 - the file exists and its SHA-256 differs from the trust store (`pithos trust` first);
 - the file is a symlink (`read_project_file` already refuses it);
 - the file does not parse or does not validate (`parse_project_file`);
+- the file is larger than 1 MiB: the read is capped, and a truncated read written back would
+  silently drop the rules past the cut;
+- a path the sandbox always mounts read-only (`.pithos.toml` itself): the entry would never apply;
 - `--list` combined with paths, `--rw` or `--remove`; `--remove` with `--rw`.
 
 **Paths**
 
 - A path that is not absolute and does not start with `~` or `{` is taken relative to the project.
-- `expand_path` (so `~` and `{project}` work), then `realpath`. It must exist.
+- `expand_path` (so `~` and `{project}` work), then `realpath`. It must exist: a dangling symlink
+  is refused, since `build_plan` would skip it as `(missing)` after reporting success.
+- `--remove` checks nothing but the path: the directory is usually gone, which is why it is being
+  removed, and the add-time checks would refuse it.
 - Written shortened: `{project}` for the project itself (how a project file makes it read-only),
   `{project}/…` inside it, `~/…` under home, absolute otherwise (`short_path`). Home itself stays
   absolute, and `check_bind` refuses it anyway.
@@ -71,7 +77,8 @@ pithos mount --list                         # show both lists
 - Finds `key = [ … ]` in that table (refuses any value that is not an array).
 - Removes a string by deleting its span and one neighbouring comma; adds one by inserting
   `, "new"` after the last string, or `"new"` into an empty array. Everything else in the file
-  is untouched, including comments between entries.
+  is untouched, including comments between entries: a comma that sits in a comment is not one of
+  ours and is never deleted.
 - Creates the key at the end of `[fs]`, or an `[fs]` table at the end of the file, when missing.
 - Refuses multi-line basic strings (`"""`), which the span scanner does not read.
 

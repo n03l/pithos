@@ -847,6 +847,22 @@ class ProjectEdit(Fixture):
         with self.assertRaises(config.ConfigError):
             config.edit_list('[fs]\nro = ["""a"""]\n', "ro", add=["~/b"])
 
+    def test_refuses_an_inline_fs_table(self):
+        with self.assertRaisesRegex(config.ConfigError, "dotted or inline"):
+            config.edit_list('fs = { ro = ["/usr"] }\n', "ro", add=["~/a"])
+
+    def test_fs_header_without_a_trailing_newline(self):
+        self.assertEqual(config.edit_list("[fs]", "ro", add=["~/a"]), '[fs]\nro = ["~/a"]\n')
+
+    def test_remove_keeps_a_comma_inside_a_comment(self):
+        text = '[fs]\nro = [\n  # note,\n  "~/b"\n]\n'
+        new = config.edit_list(text, "ro", remove=["~/b"])
+        self.assertIn("# note,", new)
+        self.assertEqual(tomllib.loads(new)["fs"]["ro"], [])
+
+    def test_non_ascii_stays_literal(self):
+        self.assertIn("dätä", config.edit_list('[fs]\nro = []\n', "ro", add=["~/dätä"]))
+
     def test_short_path(self):
         self.assertEqual(config.short_path(self.project + "/d", self.project, self.paths),
                          "{project}/d")
@@ -2245,6 +2261,13 @@ class MountCommand(Fixture):
         self.assertEqual(code, 0)
         self.assertIn("fs.ro: []", out)
 
+    def test_list_with_a_file(self):
+        self.write_project_file('[fs]\nro = ["/usr"]\nrw = ["~/w"]\n')
+        code, out = self.run_mount("--list")
+        self.assertEqual(code, 0)
+        self.assertIn('fs.ro: ["/usr"]', out)
+        self.assertIn('fs.rw: ["~/w"]', out)
+
     def test_adds_a_read_only_entry_and_trusts_it(self):
         code, out = self.run_mount("~/data")
         self.assertEqual(code, 0)
@@ -2357,6 +2380,54 @@ class MountCommand(Fixture):
                           ((), "nothing to do")):
             with self.assertRaisesRegex(config.ConfigError, msg):
                 self.run_mount(*argv)
+
+    def test_refuses_a_file_over_one_megabyte(self):
+        text = "# pad\n" * 200000 + '[fs]\nro = []\n'
+        self.write_project_file(text)
+        self.trust()
+        with self.assertRaisesRegex(config.ConfigError, "larger than"):
+            self.run_mount("~/data")
+        self.assertEqual(self.text(), text)
+
+    def test_removes_a_path_that_no_longer_exists(self):
+        self.run_mount("~/data")
+        os.rmdir(self.data)
+        code, _ = self.run_mount("--remove", "~/data")
+        self.assertEqual(code, 0)
+        self.assertEqual(tomllib.loads(self.text())["fs"]["ro"], [])
+
+    def test_duplicate_arguments_are_one_entry(self):
+        self.run_mount("~/data", "~/data")
+        self.assertEqual(tomllib.loads(self.text())["fs"]["ro"], ["~/data"])
+        code, _ = self.run_mount("--remove", "~/data", "~/data")
+        self.assertEqual(code, 0)
+        self.assertEqual(tomllib.loads(self.text())["fs"]["ro"], [])
+
+    def test_refuses_a_dangling_symlink(self):
+        os.symlink(os.path.join(self.home, "nope"), os.path.join(self.project, "broken"))
+        with self.assertRaisesRegex(config.ConfigError, "no such file"):
+            self.run_mount("broken")
+
+    def test_refuses_the_project_file_itself(self):
+        self.write_project_file('[fs]\nro = []\n')
+        self.trust()
+        with self.assertRaisesRegex(config.ConfigError, "always read-only"):
+            self.run_mount("--rw", ".pithos.toml")
+        self.assertEqual(self.text(), '[fs]\nro = []\n')
+
+    def test_refuses_an_empty_untrusted_file(self):
+        self.write_project_file("")
+        with self.assertRaisesRegex(config.ConfigError, "not trusted"):
+            self.run_mount("~/data")
+        self.assertEqual(self.text(), "")
+
+    def test_keeps_the_file_mode(self):
+        self.write_project_file('[fs]\nro = []\n')
+        os.chmod(os.path.join(self.project, config.PROJECT_FILE), 0o600)
+        self.trust()
+        self.run_mount("~/data")
+        mode = os.stat(os.path.join(self.project, config.PROJECT_FILE)).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
 
 
 class Surface(unittest.TestCase):

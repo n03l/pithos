@@ -21,6 +21,7 @@ import tomllib
 # -- where things are ------------------------------------------------------------------
 
 PROJECT_FILE = ".pithos.toml"
+PROJECT_FILE_MAX = 1024 * 1024
 ALWAYS_RO_IN_PROJECT = [PROJECT_FILE]
 # Inside the sandbox: pithos's own files, bound read-only from the host's runtime dir.
 SANDBOX_RUN = "/run/pithos"
@@ -202,7 +203,9 @@ def read_project_file(project):
     if os.path.islink(path) or not os.path.isfile(path):
         raise ConfigError(f"{path} must be a regular file, not a link")
     with open(path, "rb") as f:
-        raw = f.read(1024 * 1024)
+        raw = f.read(PROJECT_FILE_MAX + 1)
+    if len(raw) > PROJECT_FILE_MAX:  # a truncated read would be trusted and written back
+        raise ConfigError(f"{path} is larger than {PROJECT_FILE_MAX} bytes")
     return raw, hashlib.sha256(raw).hexdigest()
 
 
@@ -266,22 +269,32 @@ def toml_array_spans(text, start):
 def fs_table_span(text):
     """(start, end) of the [fs] table's body: the lines after its header, up to the next
     table header. None when the file has no [fs] table."""
-    header = re.search(r"^[ \t]*\[[ \t]*fs[ \t]*\][^\n]*\n", text, re.M)
+    header = re.search(r"^[ \t]*\[[ \t]*fs[ \t]*\][^\n]*(\n|$)", text, re.M)
     if header is None:
         return None
     nxt = re.search(r"^[ \t]*\[", text[header.end():], re.M)
     return header.end(), header.end() + (nxt.start() if nxt else len(text) - header.end())
 
 
+def in_comment(text, pos):
+    """True when pos is inside a # comment (a # before it on its line)."""
+    return "#" in text[text.rfind("\n", 0, pos) + 1:pos]
+
+
 def drop_span(text, start, s, e, close):
-    """Delete text[s:e] and one comma next to it, leaving a valid array."""
+    """Delete text[s:e] and one comma next to it, leaving a valid array. A comma inside a
+    comment is not one of ours: deleting it would change a comment the file keeps."""
     before = text.rfind(",", start, s)
-    if before >= 0 and not text[before + 1:s].strip():
+    if before >= 0 and not in_comment(text, before) and not text[before + 1:s].strip():
         return text[:before] + text[e:]
     after = text.find(",", e, close)
-    if after >= 0 and not text[e:after].strip():
+    if after >= 0 and not in_comment(text, after) and not text[e:after].strip():
         return text[:s] + text[after + 1:]
     return text[:s] + text[e:]
+
+
+def toml_literal(value):
+    return json.dumps(value, ensure_ascii=False)
 
 
 def edit_list(text, key, add=(), remove=()):
@@ -289,19 +302,19 @@ def edit_list(text, key, add=(), remove=()):
     other byte of the file. Refuses a layout it can't splice, before writing anything."""
     body = fs_table_span(text)
     if body is None:
-        if re.search(r"^[ \t]*fs[ \t]*[.\[]", text, re.M):
+        if re.search(r"^[ \t]*fs[ \t]*[.=\[]", text, re.M):
             raise ConfigError(f"{PROJECT_FILE}: 'fs' is a dotted or inline key; edit it by hand")
         if not add:
             raise ConfigError(f"{PROJECT_FILE}: no [fs] table to remove fs.{key} from")
         sep = "" if text.endswith("\n") or not text else "\n"
-        return text + sep + f"[fs]\n{key} = [" + ", ".join(json.dumps(v) for v in add) + "]\n"
+        return text + sep + f"[fs]\n{key} = [" + ", ".join(map(toml_literal, add)) + "]\n"
     start, end = body
     line = re.compile(r"^[ \t]*" + key + r"[ \t]*=[ \t]*", re.M).search(text, start, end)
     if line is None:
         if remove:
             raise ConfigError(f"{PROJECT_FILE}: fs.{key} is not set")
-        gap = "" if start == end or text[start:end].endswith("\n") else "\n"
-        new = f"{key} = [" + ", ".join(json.dumps(v) for v in add) + "]\n"
+        gap = "" if end == 0 or text[end - 1] == "\n" else "\n"
+        new = f"{key} = [" + ", ".join(map(toml_literal, add)) + "]\n"
         return text[:end] + gap + new + text[end:]
     at = line.end()
     if at >= len(text) or text[at] != "[":
@@ -318,7 +331,7 @@ def edit_list(text, key, add=(), remove=()):
         spans, close = toml_array_spans(text, at)
         if any(tomllib.loads("v = " + text[s:e])["v"] == value for s, e in spans):
             continue
-        literal = json.dumps(value)
+        literal = toml_literal(value)
         if spans:
             text = text[:spans[-1][1]] + ", " + literal + text[spans[-1][1]:]
         else:

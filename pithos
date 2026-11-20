@@ -6,6 +6,7 @@
   pithos trust [-C PROJECT] [--yes]
   pithos log [--denied] [--all]
   pithos allow [-C PROJECT] [--save | --remove | --list] [HOST[:PORT] ...]
+  pithos mount [-C PROJECT] [--rw | --remove | --list] [PATH ...]
   pithos report [--session ID | --all]
 
 The sandbox sees only the paths its profile lists and has no network except an
@@ -1185,8 +1186,9 @@ def cmd_allow(args, paths):
     return 0
 
 
-def mount_targets(paths, project, raws, data):
-    """[(entry as written, realpath)] for each path, checked like a profile entry."""
+def mount_targets(paths, project, raws, data, remove):
+    """[(entry as written, realpath)] for each path. Removing skips the checks a bind needs:
+    the path is usually gone, which is why it is being removed."""
     denied = [os.path.realpath(expand_path(d, project, paths))
               for d in data.get("fs", {}).get("deny", []) if not has_glob(d)]
     patterns = deny_patterns(data, project, paths)
@@ -1194,19 +1196,24 @@ def mount_targets(paths, project, raws, data):
     for raw in raws:
         value = raw if raw.startswith(("/", "~", "{")) else os.path.join(project, raw)
         dest = expand_path(value, project, paths)
-        if not os.path.lexists(dest):
-            raise ConfigError(f"{clean(raw)}: no such file or directory")
         src = os.path.realpath(dest)
         entry = short_path(src, project, paths)
-        written = expand_path(entry, project, paths)
-        check_project_link("pithos mount", written, src, project)
-        check_bind(src, written, paths, denied)
-        if is_sensitive(src):
-            raise ConfigError(f"{clean(entry)}: refusing to mount credentials; "
-                              "add it to your profile by hand if you need it")
-        if is_sensitive(src, patterns):
-            raise ConfigError(f"{clean(entry)}: denied by {PROJECT_FILE}")
-        targets.append((entry, src))
+        if not remove:
+            if not os.path.exists(src):
+                raise ConfigError(f"{clean(raw)}: no such file or directory")
+            written = expand_path(entry, project, paths)
+            check_project_link("pithos mount", written, src, project)
+            check_bind(src, written, paths, denied)
+            if is_within(src, project) and os.path.relpath(src, project) in ALWAYS_RO_IN_PROJECT:
+                raise ConfigError(f"{clean(entry)}: {PROJECT_FILE} is always read-only in the "
+                                  "sandbox")
+            if is_sensitive(src):
+                raise ConfigError(f"{clean(entry)}: refusing to mount credentials; "
+                                  "add it to your profile by hand if you need it")
+            if is_sensitive(src, patterns):
+                raise ConfigError(f"{clean(entry)}: denied by {PROJECT_FILE}")
+        if not any(src == seen for _, seen in targets):
+            targets.append((entry, src))
     return targets
 
 
@@ -1268,10 +1275,10 @@ def cmd_mount(args, paths):
         for key in ("ro", "rw"):
             print(clean(f"fs.{key}: {json.dumps(data.get('fs', {}).get(key, []))}"))
         return 0
-    if raw and read_trusted(paths).get(project) != digest:
+    if raw is not None and read_trusted(paths).get(project) != digest:
         raise ConfigError(f"{project}/{PROJECT_FILE} is new or changed and not trusted: "
                           f"run pithos trust -C {shlex.quote(project)} first")
-    targets = mount_targets(paths, project, args.paths, data)
+    targets = mount_targets(paths, project, args.paths, data, args.remove)
     changes, report = mount_changes(paths, project, data, targets, args.rw, args.remove)
     if not any(add or drop for add, drop in changes.values()):
         print_mounts(report)
@@ -1293,7 +1300,8 @@ def cmd_mount(args, paths):
         raise ConfigError(f"{PROJECT_FILE}: refusing to edit, this layout is not one "
                           "pithos mount can change safely; edit the file by hand")
     path = os.path.join(project, PROJECT_FILE)
-    write_project_file(project, text, os.stat(path).st_mode & 0o777 if raw else 0o644)
+    write_project_file(project, text,
+                       os.stat(path).st_mode & 0o777 if raw is not None else 0o644)
     trust_project(paths, project, text.encode("utf-8"))
     print_mounts(report)
     print(clean(f"trusted {project}/{PROJECT_FILE}"))
