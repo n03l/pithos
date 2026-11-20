@@ -316,6 +316,19 @@ pithos trust      # shows the file and what it adds, records its hash
 If the file changes, the launcher refuses to start until you trust it again. Inside the
 sandbox the file is read-only.
 
+`pithos mount` edits that file for you and trusts the result:
+
+```sh
+pithos mount ~/datasets        # add to fs.ro: read-only in the sandbox
+pithos mount --rw ~/scratch    # add to fs.rw: writable
+pithos mount --remove ~/scratch
+pithos mount --list            # what this project's file adds
+```
+
+Paths under your home are written as `~/…` and paths inside the project as `{project}/…`. The
+edit keeps the rest of the file, comments included, and is refused if the file changed since you
+trusted it. A new mount applies from the next session: mounts are fixed when the sandbox starts.
+
 Lists are added to the profile's, not replaced, so a project can add paths and hosts, or hide
 more with `deny`. It can also take a mount away: listing `{project}` under `fs.ro` makes it
 read-only even though `base` mounts it writable, since `ro` wins over `rw` on the same path.

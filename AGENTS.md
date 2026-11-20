@@ -14,7 +14,8 @@ Flat on purpose: no package directory. Use only the Python standard library (3.1
   (it runs with `-I`); none of them imports `pithos`.
 - `config.py`: what the other modules share (`ConfigError`, `clean()`, `note()`, where things
   are inside the sandbox), the profile schema, loading profiles and `.pithos.toml`, the trust
-  store, and the checks on every path a profile names.
+  store, the checks on every path a profile names, and `pithos mount`'s in-place editor for the
+  `fs` lists (`edit_list`, `short_path`, `trust_project`, `write_project_file`).
 - `resources.py`: `[limits]`, the systemd scope that enforces them, and the limit list for the
   agent (`LimitEvents`, `ScopeMonitor`).
 - `filetrace.py`: `strace` and its output, and the file notice for the agent (`SandboxView`,
@@ -78,6 +79,8 @@ Any change that touches one of these needs a test, both a hostile case and a nor
   History, other projects' transcripts and memory, `file-history` and `paste-cache` stay outside.
 - **Project config fails closed.** `.pithos.toml` applies only when its SHA-256 matches
   the trust store. It is always bound read-only, may not use `extends`, and must not be a symlink.
+  `pithos mount` rewrites only a file whose digest matches the trust store, splices the array
+  without reformatting it, re-parses and compares before writing, and trusts only what it wrote.
 - **`deny` wins.** Plain `deny` paths also refuse any bind inside them. Every path a profile
   or `.pithos.toml` writes with `{project}` must resolve inside the project, so a committed
   symlink can't point a reviewed entry at `~`; `ro_in_project` entries are the same. Their parent
