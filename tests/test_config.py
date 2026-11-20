@@ -2292,6 +2292,67 @@ class MountCommand(Fixture):
         self.run_mount("link")
         self.assertEqual(tomllib.loads(self.text())["fs"]["ro"], ["~/data"])
 
+    def trust(self):
+        with open(os.path.join(self.project, config.PROJECT_FILE), "rb") as f:
+            config.trust_project(self.paths, self.project, f.read())
+
+    def test_refuses_a_file_changed_since_it_was_trusted(self):
+        self.write_project_file('[fs]\nro = []\n')
+        with self.assertRaisesRegex(config.ConfigError, "not trusted"):
+            self.run_mount("~/data")
+        self.assertEqual(self.text(), '[fs]\nro = []\n')
+
+    def test_refuses_inside_the_sandbox(self):
+        os.environ["PITHOS"] = "1"
+        with self.assertRaisesRegex(config.ConfigError, "outside the sandbox"):
+            self.run_mount("~/data")
+
+    def test_refuses_credentials(self):
+        with self.assertRaisesRegex(config.ConfigError, "credentials"):
+            self.run_mount("~/.ssh")
+
+    def test_refuses_a_path_the_project_denies(self):
+        self.write_project_file('[fs]\ndeny = ["~/data"]\n')
+        self.trust()
+        with self.assertRaisesRegex(config.ConfigError, "inside denied"):
+            self.run_mount("~/data")
+
+    def test_refuses_a_path_a_deny_glob_matches(self):
+        self.write_project_file('[fs]\ndeny = ["~/da*"]\n')
+        self.trust()
+        with self.assertRaisesRegex(config.ConfigError, "denied by .pithos.toml"):
+            self.run_mount("~/data")
+
+    def test_refuses_a_missing_path(self):
+        with self.assertRaisesRegex(config.ConfigError, "no such file"):
+            self.run_mount("~/nope")
+
+    def test_refuses_a_symlinked_project_file(self):
+        os.symlink(os.path.join(self.home, "elsewhere"),
+                   os.path.join(self.project, config.PROJECT_FILE))
+        with self.assertRaisesRegex(config.ConfigError, "must be a regular file"):
+            self.run_mount("~/data")
+
+    def test_refuses_an_invalid_file(self):
+        self.write_project_file('[fs]\nro = "not a list"\n')
+        self.trust()
+        with self.assertRaisesRegex(config.ConfigError, "expected a list of strings"):
+            self.run_mount("~/data")
+
+    def test_refuses_a_layout_it_cannot_edit(self):
+        self.write_project_file('fs.ro = ["/usr"]\n')
+        self.trust()
+        with self.assertRaisesRegex(config.ConfigError, "dotted or inline"):
+            self.run_mount("~/data")
+        self.assertEqual(self.text(), 'fs.ro = ["/usr"]\n')
+
+    def test_refuses_bad_arguments(self):
+        for argv, msg in ((("--list", "~/data"), "--list takes no paths"),
+                          (("--remove", "--rw", "~/data"), "--remove takes no --rw"),
+                          ((), "nothing to do")):
+            with self.assertRaisesRegex(config.ConfigError, msg):
+                self.run_mount(*argv)
+
 
 class Surface(unittest.TestCase):
     def test_entry_points(self):
