@@ -346,6 +346,31 @@ def write_private_json(path, data):
         raise
 
 
+def write_project_file(project, text, mode):
+    """Replace the project file atomically, keeping its mode."""
+    path = os.path.join(project, PROJECT_FILE)
+    try:
+        fd, tmp = tempfile.mkstemp(dir=project, prefix=".pithos-")
+    except OSError as e:
+        raise ConfigError(f"can't write {path}: {e.strerror}")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def trust_project(paths, project, raw):
+    """Record the digest of the project file that was just read or written."""
+    trusted = read_trusted(paths)
+    trusted[project] = hashlib.sha256(raw).hexdigest()
+    os.makedirs(paths.state, mode=0o700, exist_ok=True)
+    write_private_json(paths.trusted, trusted)
+
+
 # -- paths -----------------------------------------------------------------------------
 
 def is_within(path, parent):

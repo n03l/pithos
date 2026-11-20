@@ -2214,10 +2214,89 @@ exit 0
         self.assertFalse(os.path.exists("pwned"))
 
 
+class MountCommand(Fixture):
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("PITHOS", None)
+        self.data = os.path.join(self.home, "data")
+        os.makedirs(self.data)
+
+    def run_mount(self, *argv):
+        _, args = sb.parse_args(["mount", "-C", self.project, *argv])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = sb.cmd_mount(args, self.paths)
+        return code, out.getvalue()
+
+    def text(self):
+        with open(os.path.join(self.project, config.PROJECT_FILE), encoding="utf-8") as f:
+            return f.read()
+
+    def is_trusted(self):
+        return config.read_trusted(self.paths).get(self.project) == hashlib.sha256(
+            self.text().encode()).hexdigest()
+
+    def test_list_without_a_file(self):
+        code, out = self.run_mount("--list")
+        self.assertEqual(code, 0)
+        self.assertIn("fs.ro: []", out)
+
+    def test_adds_a_read_only_entry_and_trusts_it(self):
+        code, out = self.run_mount("~/data")
+        self.assertEqual(code, 0)
+        self.assertEqual(tomllib.loads(self.text())["fs"]["ro"], ["~/data"])
+        self.assertTrue(self.is_trusted())
+        self.assertIn("next session", out)
+        self.assertIn("+ fs.ro ~/data", out)
+
+    def test_rw_and_moves_between_lists(self):
+        self.run_mount("~/data")
+        self.run_mount("--rw", "~/data")
+        data = tomllib.loads(self.text())["fs"]
+        self.assertEqual((data["ro"], data["rw"]), ([], ["~/data"]))
+        self.run_mount("~/data")
+        data = tomllib.loads(self.text())["fs"]
+        self.assertEqual((data["ro"], data["rw"]), (["~/data"], []))
+
+    def test_adding_twice_changes_nothing(self):
+        self.run_mount("~/data")
+        before = self.text()
+        code, out = self.run_mount("~/data")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.text(), before)
+        self.assertIn("already listed", out)
+
+    def test_remove(self):
+        self.run_mount("~/data")
+        code, _ = self.run_mount("--remove", "~/data")
+        self.assertEqual(code, 0)
+        self.assertEqual(tomllib.loads(self.text())["fs"]["ro"], [])
+        self.assertTrue(self.is_trusted())
+
+    def test_relative_path_is_inside_the_project(self):
+        os.makedirs(os.path.join(self.project, "docs"))
+        self.run_mount("docs")
+        self.assertEqual(tomllib.loads(self.text())["fs"]["ro"], ["{project}/docs"])
+
+    def test_outside_home_stays_absolute(self):
+        outside = os.path.join(self.root, "srv")
+        os.makedirs(outside)
+        self.run_mount(outside)
+        self.assertEqual(tomllib.loads(self.text())["fs"]["ro"], [outside])
+
+    def test_a_project_link_is_written_as_its_target(self):
+        os.symlink(self.data, os.path.join(self.project, "link"))
+        self.run_mount("link")
+        self.assertEqual(tomllib.loads(self.text())["fs"]["ro"], ["~/data"])
+
+
 class Surface(unittest.TestCase):
     def test_entry_points(self):
         """Fails when a subcommand is added: review it, then update this list."""
-        self.assertEqual(sb.COMMANDS, ("run", "trust", "log", "allow", "report"))
+        self.assertEqual(sb.COMMANDS, ("run", "trust", "log", "allow", "mount", "report"))
         for cmd in sb.COMMANDS:
             self.assertEqual(sb.parse_args([cmd] if cmd != "run" else ["run", "true"])[0], cmd)
         self.assertEqual(sb.parse_args(["claude"])[0], "run")

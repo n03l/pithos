@@ -16,6 +16,7 @@ terminal, `pithos allow` approves hosts for the project's running sessions.
 
 import argparse
 import contextlib
+import copy
 import fcntl
 import glob
 import json
@@ -39,9 +40,10 @@ from config import (  # noqa: E402
     ALWAYS_RO_IN_PROJECT, ConfigError, ENV_NAME, PROFILE_NAME, PROJECT_FILE, Paths,
     SANDBOX_BLOCKED_FILES, SANDBOX_BLOCKED_HOSTS, SANDBOX_CLAUDE_AGENT, SANDBOX_CONFIG,
     SANDBOX_LIMIT_EVENTS, SANDBOX_NOTICE, SANDBOX_OPENCODE_CONFIG, SANDBOX_PYTHON, SANDBOX_RUN,
-    check_bind, check_project, check_project_link, clean, expand, expand_glob, expand_path,
-    has_glob, is_within, load_profile, load_project, merge, note, parse_project_file,
-    read_json_table, read_project_file, read_trusted, write_private_json,
+    check_bind, check_project, check_project_link, clean, deny_patterns, edit_list, expand,
+    expand_glob, expand_path, has_glob, is_sensitive, is_within, load_profile, load_project, merge,
+    note, parse_project_file, read_json_table, read_project_file, read_trusted, short_path,
+    trust_project, write_private_json, write_project_file,
 )
 from resources import (  # noqa: E402
     LimitEvents, ScopeMonitor, bridge_limits, check_scope, describe_amount, describe_limits,
@@ -54,7 +56,7 @@ from filetrace import (  # noqa: E402
 from report import (LOGS_TOTAL_LIMIT, cmd_report, event_weight, offerable_host,  # noqa: E402
                     prune_logs, read_session, rule_snapshot)
 
-COMMANDS = ("run", "trust", "log", "allow", "report")
+COMMANDS = ("run", "trust", "log", "allow", "mount", "report")
 # The sandbox picks the names in the denied list: don't let it flood the prompt.
 PENDING_SHOWN = 20
 # opencode lists claude-agent models only once this entry is in its per-project database. It
@@ -1094,10 +1096,7 @@ def cmd_trust(args, paths):
             raise ConfigError("not a terminal: pass --yes to trust non-interactively")
         if input("Trust this file? [y/N] ").strip().lower() != "y":
             return 1
-    trusted = read_trusted(paths)
-    trusted[project] = digest
-    os.makedirs(paths.state, mode=0o700, exist_ok=True)
-    write_private_json(paths.trusted, trusted)
+    trust_project(paths, project, raw)
     print(f"trusted {project}/{PROJECT_FILE}")
     return 0
 
@@ -1186,6 +1185,122 @@ def cmd_allow(args, paths):
     return 0
 
 
+def mount_targets(paths, project, raws, data):
+    """[(entry as written, realpath)] for each path, checked like a profile entry."""
+    denied = [os.path.realpath(expand_path(d, project, paths))
+              for d in data.get("fs", {}).get("deny", []) if not has_glob(d)]
+    patterns = deny_patterns(data, project, paths)
+    targets = []
+    for raw in raws:
+        value = raw if raw.startswith(("/", "~", "{")) else os.path.join(project, raw)
+        dest = expand_path(value, project, paths)
+        if not os.path.lexists(dest):
+            raise ConfigError(f"{clean(raw)}: no such file or directory")
+        src = os.path.realpath(dest)
+        entry = short_path(src, project, paths)
+        written = expand_path(entry, project, paths)
+        check_project_link("pithos mount", written, src, project)
+        check_bind(src, written, paths, denied)
+        if is_sensitive(src):
+            raise ConfigError(f"{clean(entry)}: refusing to mount credentials; "
+                              "add it to your profile by hand if you need it")
+        if is_sensitive(src, patterns):
+            raise ConfigError(f"{clean(entry)}: denied by {PROJECT_FILE}")
+        targets.append((entry, src))
+    return targets
+
+
+def mount_changes(paths, project, data, targets, rw, remove):
+    """({key: (adds, removes)}, [(sign, key, entry)]) for the requested change."""
+    fs = data.get("fs", {})
+
+    def listed(key, src):
+        for entry in fs.get(key, []):
+            if os.path.realpath(expand_path(entry, project, paths)) == src:
+                return entry
+        return None
+
+    changes = {"ro": ([], []), "rw": ([], [])}
+    report = []
+    for entry, src in targets:
+        if remove:
+            hit = [key for key in ("ro", "rw") if listed(key, src)]
+            if not hit:
+                raise ConfigError(f"{clean(entry)} is not in {PROJECT_FILE} "
+                                  "(a path from a profile is removed there)")
+            for key in hit:
+                changes[key][1].append(listed(key, src))
+                report.append(("-", key, entry))
+            continue
+        wanted = "rw" if rw else "ro"
+        if listed(wanted, src):
+            report.append(("=", wanted, entry))
+            continue
+        for key in ("ro", "rw"):
+            old = listed(key, src)
+            if key != wanted and old:
+                changes[key][1].append(old)
+                report.append(("-", key, entry))
+        changes[wanted][0].append(entry)
+        report.append(("+", wanted, entry))
+    return changes, report
+
+
+def print_mounts(report):
+    for sign, key, entry in report:
+        print(clean(f"{sign} fs.{key} {entry}" + (" (already listed)" if sign == "=" else "")))
+
+
+def cmd_mount(args, paths):
+    if os.environ.get("PITHOS"):
+        raise ConfigError("pithos mount must run outside the sandbox, in another terminal")
+    if args.list and (args.paths or args.rw or args.remove):
+        raise ConfigError("--list takes no paths, --rw or --remove")
+    if args.remove and args.rw:
+        raise ConfigError("--remove takes no --rw: it removes from fs.ro and fs.rw")
+    if not args.paths and not args.list:
+        raise ConfigError("nothing to do: pass PATH... or --list")
+    project = resolve_project(args.project)
+    check_project(project, paths)
+    raw, digest = read_project_file(project)
+    data = parse_project_file(project, raw) if raw else {}
+    if args.list:
+        for key in ("ro", "rw"):
+            print(clean(f"fs.{key}: {json.dumps(data.get('fs', {}).get(key, []))}"))
+        return 0
+    if raw and read_trusted(paths).get(project) != digest:
+        raise ConfigError(f"{project}/{PROJECT_FILE} is new or changed and not trusted: "
+                          f"run pithos trust -C {shlex.quote(project)} first")
+    targets = mount_targets(paths, project, args.paths, data)
+    changes, report = mount_changes(paths, project, data, targets, args.rw, args.remove)
+    if not any(add or drop for add, drop in changes.values()):
+        print_mounts(report)
+        print("nothing to change")
+        return 0
+    text = raw.decode("utf-8") if raw else ""
+    for key, (add, drop) in changes.items():
+        if add or drop:
+            text = edit_list(text, key, add, drop)
+    expected = copy.deepcopy(data)
+    for key, (add, drop) in changes.items():
+        if not (add or drop):
+            continue
+        entries = expected.setdefault("fs", {}).setdefault(key, [])
+        for entry in drop:
+            entries.remove(entry)
+        entries.extend(add)
+    if parse_project_file(project, text.encode("utf-8")) != expected:
+        raise ConfigError(f"{PROJECT_FILE}: refusing to edit, this layout is not one "
+                          "pithos mount can change safely; edit the file by hand")
+    path = os.path.join(project, PROJECT_FILE)
+    write_project_file(project, text, os.stat(path).st_mode & 0o777 if raw else 0o644)
+    trust_project(paths, project, text.encode("utf-8"))
+    print_mounts(report)
+    print(clean(f"trusted {project}/{PROJECT_FILE}"))
+    print("mounts apply from the next session")
+    return 0
+
+
 def cmd_log(args, paths):
     files = sorted(glob.glob(os.path.join(glob.escape(paths.logs), "*.jsonl")))
     if not files:
@@ -1220,7 +1335,7 @@ def parse_args(argv):
         command = "run"
     parser = argparse.ArgumentParser(prog=f"pithos {command}", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    if command in ("run", "trust", "allow"):
+    if command in ("run", "trust", "allow", "mount"):
         parser.add_argument("-C", "--project", help="project directory (default: cwd)")
     if command == "run":
         parser.add_argument("-p", "--profile", help="profile name (default: guessed from CMD)")
@@ -1245,6 +1360,16 @@ def parse_args(argv):
         parser.add_argument("--remove", action="store_true",
                             help="revoke from running sessions and the saved list")
         parser.add_argument("--list", action="store_true", help="show approved hosts")
+    elif command == "mount":
+        parser.add_argument("paths", nargs="*", metavar="PATH",
+                            help="host path to show in the sandbox; a relative path is taken "
+                                 "relative to the project")
+        parser.add_argument("--rw", action="store_true",
+                            help="writable (fs.rw) instead of read-only (fs.ro)")
+        parser.add_argument("--remove", action="store_true",
+                            help="remove these paths from fs.ro and fs.rw")
+        parser.add_argument("--list", action="store_true",
+                            help="show fs.ro and fs.rw from the project file")
     elif command == "report":
         which = parser.add_mutually_exclusive_group()
         which.add_argument("--session", metavar="ID", help="report on this session (default: latest)")
@@ -1261,7 +1386,7 @@ def main(argv):
     try:
         paths = Paths()
         commands = {"run": cmd_run, "trust": cmd_trust, "log": cmd_log, "allow": cmd_allow,
-                    "report": cmd_report}
+                    "mount": cmd_mount, "report": cmd_report}
         return commands[command](args, paths)
     except ConfigError as e:
         note(clean(e))
