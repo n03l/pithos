@@ -52,9 +52,9 @@ pithos mount --list                         # show both lists
 
 - A path that is not absolute and does not start with `~` or `{` is taken relative to the project.
 - `expand_path` (so `~` and `{project}` work), then `realpath`. It must exist.
-- Written shortened: `{project}/…` inside the project, `~/…` under home, absolute otherwise
-  (`short_path`). The project itself and home itself stay absolute: the profile already mounts
-  them and a `{project}` entry would mean something else.
+- Written shortened: `{project}` for the project itself (how a project file makes it read-only),
+  `{project}/…` inside it, `~/…` under home, absolute otherwise (`short_path`). Home itself stays
+  absolute, and `check_bind` refuses it anyway.
 - Checks, the same a profile entry gets: `check_bind` (system dirs, config, state, home itself)
   and `is_sensitive` with `deny_patterns(data, …)` (the project's own `deny`, credentials such as
   `~/.ssh` or `.env`). A profile's `deny` is still enforced by `build_plan` at run time.

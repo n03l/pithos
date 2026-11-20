@@ -327,10 +327,11 @@ def edit_list(text, key, add=(), remove=()):
 
 
 def short_path(real, project, paths):
-    """A path as a project file writes it: {project}/…, ~/… or absolute."""
-    for base, prefix in ((project, "{project}"), (paths.home, "~")):
-        if real != base and is_within(real, base):
-            return prefix + real[len(base):]
+    """A path as a project file writes it: {project}, {project}/…, ~/… or absolute."""
+    if is_within(real, project):
+        return "{project}" + real[len(project):]
+    if real != paths.home and is_within(real, paths.home):
+        return "~" + real[len(paths.home):]
     return real
 
 

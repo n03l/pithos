@@ -850,6 +850,7 @@ class ProjectEdit(Fixture):
     def test_short_path(self):
         self.assertEqual(config.short_path(self.project + "/d", self.project, self.paths),
                          "{project}/d")
+        self.assertEqual(config.short_path(self.project, self.project, self.paths), "{project}")
         self.assertEqual(config.short_path(self.home + "/d", self.project, self.paths), "~/d")
         self.assertEqual(config.short_path("/srv/d", self.project, self.paths), "/srv/d")
         self.assertEqual(config.short_path(self.home, self.project, self.paths), self.home)
@@ -2291,6 +2292,10 @@ class MountCommand(Fixture):
         os.symlink(self.data, os.path.join(self.project, "link"))
         self.run_mount("link")
         self.assertEqual(tomllib.loads(self.text())["fs"]["ro"], ["~/data"])
+
+    def test_the_project_itself_becomes_read_only(self):
+        self.run_mount(self.project)
+        self.assertEqual(tomllib.loads(self.text())["fs"]["ro"], ["{project}"])
 
     def trust(self):
         with open(os.path.join(self.project, config.PROJECT_FILE), "rb") as f:
